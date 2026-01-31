@@ -46,3 +46,111 @@
 Если не работает TCP, попробуйте добавить флаг `-udp`.
 
 Добавьте флаг `-n 1` для более стабильного подключения в 1 поток (ограничение 5 Мбит/с)
+
+## v2ray
+
+Вместо WireGuard можно использовать любое V2Ray-ядро которое его поддерживает (например, xray или sing-box) и любой V2Ray-клиент который использует это ядро (например, v2rayN или v2rayNG). С помощью их вы сможете добавить больше входящих интерфейсов (например, SOCKS) и реализовать точечный роутинг.
+
+Пример конфигов:
+
+<details>
+
+<summary>
+Клиент
+</summary>
+
+```json
+{
+    "inbounds": [
+        {
+            "protocol": "socks",
+            "listen": "127.0.0.1",
+            "port": 1080,
+            "settings": {
+                "udp": true
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls"
+                ]
+            }
+        },
+        {
+            "protocol": "http",
+            "listen": "127.0.0.1",
+            "port": 8080,
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls"
+                ]
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "wireguard",
+            "settings": {
+                "secretKey": "<client secret key>",
+                "peers": [
+                    {
+                        "endpoint": "127.0.0.1:9000",
+                        "publicKey": "<server public key>"
+                    }
+                ],
+                "domainStrategy": "ForceIPv4",
+                "mtu": 1280
+            }
+        }
+    ]
+}
+```
+
+</details>
+
+<details>
+
+<summary>
+Сервер
+</summary>
+
+```json
+{
+    "inbounds": [
+        {
+            "protocol": "wireguard",
+            "listen": "0.0.0.0",
+            "port": 51820,
+            "settings": {
+                "secretKey": "<server secret key>",
+                "peers": [
+                    {
+                        "publicKey": "<client public key>"
+                    }
+                ],
+                "mtu": 1280
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls"
+                ]
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv4"
+            }
+        }
+    ]
+}
+```
+
+</details>
