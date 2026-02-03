@@ -824,17 +824,22 @@ func main() { //nolint:cyclop
 	var link string
 	var getCreds getCredsFunc
 	if *vklink != "" {
-		link = (*vklink)[len(*vklink)-43:]
+		parts := strings.Split(*vklink, "join/")
+		link = parts[len(parts)-1]
 		getCreds = getVkCreds
 		if *n <= 0 {
 			*n = 16
 		}
 	} else {
-		link = (*yalink)[len(*yalink)-10:]
+		parts := strings.Split(*yalink, "j/")
+		link = parts[len(parts)-1]
 		getCreds = getYandexCreds
 		if *n <= 0 {
 			*n = 1
 		}
+	}
+	if idx := strings.IndexAny(link, "/?#"); idx != -1 {
+		link = link[:idx]
 	}
 	params := &turnParams{
 		*host,
