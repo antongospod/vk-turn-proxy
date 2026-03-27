@@ -367,7 +367,9 @@ func getYandexCreds(link string) (string, string, string, error) {
 		return "", "", "", fmt.Errorf("ws write: %w", err)
 	}
 
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return "", "", "", fmt.Errorf("ws set read deadline: %w", err)
+	}
 
 	for {
 		_, msg, err := conn.ReadMessage()
@@ -475,8 +477,12 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 	context.AfterFunc(dtlsctx, func() {
-		listenConn.SetDeadline(time.Now())
-		dtlsConn.SetDeadline(time.Now())
+		if err := listenConn.SetDeadline(time.Now()); err != nil {
+			log.Printf("Failed to set listener deadline: %s", err)
+		}
+		if err := dtlsConn.SetDeadline(time.Now()); err != nil {
+			log.Printf("Failed to set DTLS deadline: %s", err)
+		}
 	})
 	var addr atomic.Value
 	// Start read-loop on listenConn
@@ -537,8 +543,12 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	}()
 
 	wg.Wait()
-	listenConn.SetDeadline(time.Time{})
-	dtlsConn.SetDeadline(time.Time{})
+	if err := listenConn.SetDeadline(time.Time{}); err != nil {
+		log.Printf("Failed to clear listener deadline: %s", err)
+	}
+	if err := dtlsConn.SetDeadline(time.Time{}); err != nil {
+		log.Printf("Failed to clear DTLS deadline: %s", err)
+	}
 }
 
 type connectedUDPConn struct {
@@ -672,8 +682,12 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	wg.Add(2)
 	turnctx, turncancel := context.WithCancel(context.Background())
 	context.AfterFunc(turnctx, func() {
-		relayConn.SetDeadline(time.Now())
-		conn2.SetDeadline(time.Now())
+		if err := relayConn.SetDeadline(time.Now()); err != nil {
+			log.Printf("Failed to set relay deadline: %s", err)
+		}
+		if err := conn2.SetDeadline(time.Now()); err != nil {
+			log.Printf("Failed to set upstream deadline: %s", err)
+		}
 	})
 	var addr atomic.Value
 	// Start read-loop on conn2 (output of DTLS)
@@ -734,8 +748,12 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	}()
 
 	wg.Wait()
-	relayConn.SetDeadline(time.Time{})
-	conn2.SetDeadline(time.Time{})
+	if err := relayConn.SetDeadline(time.Time{}); err != nil {
+		log.Printf("Failed to clear relay deadline: %s", err)
+	}
+	if err := conn2.SetDeadline(time.Time{}); err != nil {
+		log.Printf("Failed to clear upstream deadline: %s", err)
+	}
 }
 
 func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}) {
