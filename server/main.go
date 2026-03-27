@@ -89,7 +89,11 @@ func main() {
 		wg1.Add(1)
 		go func(conn net.Conn) {
 			defer wg1.Done()
-			defer conn.Close() // graceful shutdown
+			defer func() {
+				if closeErr := conn.Close(); closeErr != nil {
+					log.Printf("failed to close incoming connection: %s", closeErr)
+				}
+			}()
 			var err error = nil
 			log.Printf("Connection from %s\n", conn.RemoteAddr())
 			// `conn` is of type `net.Conn` but may be casted to `dtls.Conn`

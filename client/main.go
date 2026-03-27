@@ -56,7 +56,11 @@ func getVkCreds(link string) (string, string, string, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer httpResp.Body.Close()
+		defer func() {
+			if closeErr := httpResp.Body.Close(); closeErr != nil {
+				log.Printf("close response body: %s", closeErr)
+			}
+		}()
 
 		body, err := io.ReadAll(httpResp.Body)
 		if err != nil {
@@ -267,7 +271,11 @@ func getYandexCreds(link string) (string, string, string, error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("close response body: %s", closeErr)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return "", "", "", fmt.Errorf("GetConference: status=%s body=%s", resp.Status, string(body))
@@ -295,7 +303,11 @@ func getYandexCreds(link string) (string, string, string, error) {
 	if err != nil {
 		return "", "", "", fmt.Errorf("ws dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			log.Printf("close websocket: %s", closeErr)
+		}
+	}()
 
 	req1 := HelloRequest{
 		UID: uuid.New().String(),
