@@ -115,12 +115,12 @@ jobs:
             EXT=
           fi
 
-          GOOS=$GOOS GOARCH=$GOARCH GOARM=$GOARM GOMIPS=$GOMIPS\
+          GOOS=$GOOS GOARCH=$GOARCH GOARM=$GOARM GOMIPS=$GOMIPS \
           go build -ldflags "-s -w -checklinkname=0" -trimpath \
             -o "dist/client-${GOOS}-${GOARCH}${EXT}" \
             ./client
           
-          GOOS=$GOOS GOARCH=$GOARCH GOARM=$GOARM GOMIPS=$GOMIPS\
+          GOOS=$GOOS GOARCH=$GOARCH GOARM=$GOARM GOMIPS=$GOMIPS \
           go build -ldflags "-s -w -checklinkname=0" -trimpath \
             -o "dist/server-${GOOS}-${GOARCH}${EXT}" \
             ./server
