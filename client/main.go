@@ -10,6 +10,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/bschaatsbergen/dnsdialer"
+	"github.com/cbeuw/connutil"
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+	"github.com/pion/dtls/v3"
+	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	"github.com/pion/logging"
+	"github.com/pion/turn/v5"
 	"io"
 	"log"
 	"net"
@@ -21,50 +29,13 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/cbeuw/connutil"
-	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
-	"github.com/pion/dtls/v3"
-	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
-	"github.com/pion/logging"
-	"github.com/pion/turn/v5"
 )
 
 type getCredsFunc func(string) (string, string, string, error)
 
-func getVkCreds(link string) (string, string, string, error) {
-
-	dnsServers := []string{"77.88.8.8:53", "77.88.8.1:53"}
+func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, error) {
 
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
-
-		resolver := &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				d := net.Dialer{
-					Timeout: 15 * time.Second,
-				}
-
-				for _, dnsServer := range dnsServers {
-					for i := 0; i < 3; i++ {
-						conn, err := d.DialContext(ctx, network, dnsServer)
-						if err == nil {
-							return conn, nil
-						}
-						time.Sleep(200 * time.Millisecond)
-					}
-				}
-
-				return d.DialContext(ctx, network, address)
-			},
-		}
-
-		dialer := &net.Dialer{
-			Timeout:   20 * time.Second,
-			KeepAlive: 30 * time.Second,
-			Resolver:  resolver,
-		}
 
 		client := &http.Client{
 			Timeout: 20 * time.Second,
@@ -870,12 +841,22 @@ func main() { //nolint:cyclop
 	if (*vklink == "") == (*yalink == "") {
 		log.Panicf("Need either vk-link or yandex-link!")
 	}
+
 	var link string
 	var getCreds getCredsFunc
 	if *vklink != "" {
 		parts := strings.Split(*vklink, "join/")
 		link = parts[len(parts)-1]
-		getCreds = getVkCreds
+
+		dialer := dnsdialer.New(
+			dnsdialer.WithResolvers("77.88.8.8:53", "77.88.8.1:53", "8.8.8.8:53", "8.8.4.4:53", "1.1.1.1:53"),
+			dnsdialer.WithStrategy(dnsdialer.Fallback{}),
+			dnsdialer.WithCache(100, 10*time.Hour, 10*time.Hour),
+		)
+
+		getCreds = func(s string) (string, string, string, error) {
+			return getVkCreds(s, dialer)
+		}
 		if *n <= 0 {
 			*n = 16
 		}
@@ -919,7 +900,7 @@ func main() { //nolint:cyclop
 	}()
 
 	wg1 := sync.WaitGroup{}
-	t := time.Tick(100 * time.Millisecond)
+	t := time.Tick(200 * time.Millisecond)
 	if *direct {
 		for i := 0; i < *n; i++ {
 			wg1.Go(func() {
