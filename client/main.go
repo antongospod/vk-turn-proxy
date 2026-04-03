@@ -6,10 +6,29 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"log"
+	"math/rand"
+	"net"
+	"net/http"
+	neturl "net/url"
+	"os"
+	"os/signal"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
 	"github.com/bschaatsbergen/dnsdialer"
 	"github.com/cbeuw/connutil"
 	"github.com/google/uuid"
@@ -17,26 +36,348 @@ import (
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/logging"
+	"github.com/pion/transport/v4"
 	"github.com/pion/turn/v5"
-	"io"
-	"log"
-	"net"
-	"net/http"
-	"os"
-	"os/signal"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"syscall"
-	"time"
 )
 
 type getCredsFunc func(string) (string, string, string, error)
 
+type directNet struct{}
+
+type directDialer struct {
+	*net.Dialer
+}
+
+type directListenConfig struct {
+	*net.ListenConfig
+}
+
+// globalClientWGAddr safely stores the UDP address of the local WireGuard client
+var globalClientWGAddr atomic.Value
+
+func newDirectNet() transport.Net {
+	return directNet{}
+}
+
+func (directNet) ListenPacket(network string, address string) (net.PacketConn, error) {
+	return net.ListenPacket(network, address) //nolint:noctx
+}
+
+func (directNet) ListenUDP(network string, locAddr *net.UDPAddr) (transport.UDPConn, error) {
+	return net.ListenUDP(network, locAddr)
+}
+
+func (directNet) ListenTCP(network string, laddr *net.TCPAddr) (transport.TCPListener, error) {
+	listener, err := net.ListenTCP(network, laddr)
+	if err != nil {
+		return nil, err
+	}
+
+	return directTCPListener{listener}, nil
+}
+
+func (directNet) Dial(network, address string) (net.Conn, error) {
+	return net.Dial(network, address) //nolint:noctx
+}
+
+func (directNet) DialUDP(network string, laddr, raddr *net.UDPAddr) (transport.UDPConn, error) {
+	return net.DialUDP(network, laddr, raddr)
+}
+
+func (directNet) DialTCP(network string, laddr, raddr *net.TCPAddr) (transport.TCPConn, error) {
+	return net.DialTCP(network, laddr, raddr)
+}
+
+func (directNet) ResolveIPAddr(network, address string) (*net.IPAddr, error) {
+	return net.ResolveIPAddr(network, address)
+}
+
+func (directNet) ResolveUDPAddr(network, address string) (*net.UDPAddr, error) {
+	return net.ResolveUDPAddr(network, address)
+}
+
+func (directNet) ResolveTCPAddr(network, address string) (*net.TCPAddr, error) {
+	return net.ResolveTCPAddr(network, address)
+}
+
+func (directNet) Interfaces() ([]*transport.Interface, error) {
+	return nil, transport.ErrNotSupported
+}
+
+func (directNet) InterfaceByIndex(index int) (*transport.Interface, error) {
+	return nil, fmt.Errorf("%w: index=%d", transport.ErrInterfaceNotFound, index)
+}
+
+func (directNet) InterfaceByName(name string) (*transport.Interface, error) {
+	return nil, fmt.Errorf("%w: %s", transport.ErrInterfaceNotFound, name)
+}
+
+func (directNet) CreateDialer(dialer *net.Dialer) transport.Dialer {
+	return directDialer{Dialer: dialer}
+}
+
+func (directNet) CreateListenConfig(listenerConfig *net.ListenConfig) transport.ListenConfig {
+	return directListenConfig{ListenConfig: listenerConfig}
+}
+
+func (d directDialer) Dial(network, address string) (net.Conn, error) {
+	return d.Dialer.Dial(network, address)
+}
+
+func (d directListenConfig) Listen(ctx context.Context, network, address string) (net.Listener, error) {
+	return d.ListenConfig.Listen(ctx, network, address)
+}
+
+func (d directListenConfig) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	return d.ListenConfig.ListenPacket(ctx, network, address)
+}
+
+type directTCPListener struct {
+	*net.TCPListener
+}
+
+func (l directTCPListener) AcceptTCP() (transport.TCPConn, error) {
+	return l.TCPListener.AcceptTCP()
+}
+
+// region automatic captcha solver
+
+type vkCaptchaError struct {
+	ErrorCode      int
+	ErrorMsg       string
+	CaptchaSid     string
+	RedirectUri    string
+	SessionToken   string
+	CaptchaTs      string
+	CaptchaAttempt string
+}
+
+func parseVkCaptchaError(errData map[string]interface{}) *vkCaptchaError {
+	codeFloat, _ := errData["error_code"].(float64)
+	redirectUri, _ := errData["redirect_uri"].(string)
+	errorMsg, _ := errData["error_msg"].(string)
+
+	captchaSid, _ := errData["captcha_sid"].(string)
+	if captchaSid == "" {
+		if sidNum, ok := errData["captcha_sid"].(float64); ok {
+			captchaSid = fmt.Sprintf("%.0f", sidNum)
+		}
+	}
+
+	var sessionToken string
+	if redirectUri != "" {
+		if parsed, err := neturl.Parse(redirectUri); err == nil {
+			sessionToken = parsed.Query().Get("session_token")
+		}
+	}
+
+	var captchaTs string
+	if tsFloat, ok := errData["captcha_ts"].(float64); ok {
+		captchaTs = fmt.Sprintf("%.0f", tsFloat)
+	} else if tsStr, ok := errData["captcha_ts"].(string); ok {
+		captchaTs = tsStr
+	}
+
+	var captchaAttempt string
+	if attFloat, ok := errData["captcha_attempt"].(float64); ok {
+		captchaAttempt = fmt.Sprintf("%.0f", attFloat)
+	} else if attStr, ok := errData["captcha_attempt"].(string); ok {
+		captchaAttempt = attStr
+	}
+
+	return &vkCaptchaError{
+		ErrorCode:      int(codeFloat),
+		ErrorMsg:       errorMsg,
+		CaptchaSid:     captchaSid,
+		RedirectUri:    redirectUri,
+		SessionToken:   sessionToken,
+		CaptchaTs:      captchaTs,
+		CaptchaAttempt: captchaAttempt,
+	}
+}
+
+func solveVkCaptcha(ctx context.Context, captchaErr *vkCaptchaError, dialer *dnsdialer.Dialer) (string, error) {
+	log.Printf("Solving VK Smart Captcha automatically...")
+	if captchaErr.SessionToken == "" {
+		return "", fmt.Errorf("no session_token in redirect_uri")
+	}
+
+	powInput, difficulty, err := fetchPowInput(ctx, captchaErr.RedirectUri, dialer)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch PoW input: %w", err)
+	}
+
+	hash := solvePoW(powInput, difficulty)
+
+	successToken, err := callCaptchaNotRobot(ctx, captchaErr.SessionToken, hash, dialer)
+	if err != nil {
+		return "", fmt.Errorf("captchaNotRobot API failed: %w", err)
+	}
+
+	log.Printf("VK Smart Captcha Solved Successfully!")
+	return successToken, nil
+}
+
+func fetchPowInput(ctx context.Context, redirectUri string, dialer *dnsdialer.Dialer) (string, int, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", redirectUri, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			DialContext: dialer.DialContext,
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", 0, err
+	}
+	html := string(body)
+
+	powInputRe := regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
+	powInputMatch := powInputRe.FindStringSubmatch(html)
+	if len(powInputMatch) < 2 {
+		return "", 0, fmt.Errorf("powInput not found in captcha HTML")
+	}
+	powInput := powInputMatch[1]
+
+	diffRe := regexp.MustCompile(`startsWith\('0'\.repeat\((\d+)\)\)`)
+	diffMatch := diffRe.FindStringSubmatch(html)
+	difficulty := 2
+	if len(diffMatch) >= 2 {
+		if d, err := strconv.Atoi(diffMatch[1]); err == nil {
+			difficulty = d
+		}
+	}
+	return powInput, difficulty, nil
+}
+
+func solvePoW(powInput string, difficulty int) string {
+	target := strings.Repeat("0", difficulty)
+	for nonce := 1; nonce <= 10000000; nonce++ {
+		data := powInput + strconv.Itoa(nonce)
+		hash := sha256.Sum256([]byte(data))
+		hexHash := hex.EncodeToString(hash[:])
+		if strings.HasPrefix(hexHash, target) {
+			return hexHash
+		}
+	}
+	return ""
+}
+
+func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, dialer *dnsdialer.Dialer) (string, error) {
+	vkReq := func(method string, postData string) (map[string]interface{}, error) {
+		reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
+		req, err := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(postData))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", "https://vk.ru")
+		req.Header.Set("Referer", "https://vk.ru/")
+
+		client := &http.Client{
+			Timeout: 20 * time.Second,
+			Transport: &http.Transport{
+				DialContext: dialer.DialContext,
+			},
+		}
+
+		httpResp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer httpResp.Body.Close()
+
+		body, err := io.ReadAll(httpResp.Body)
+		if err != nil {
+			return nil, err
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
+
+	baseParams := fmt.Sprintf("session_token=%s&domain=vk.com&adFp=&access_token=", neturl.QueryEscape(sessionToken))
+
+	// Step 1: settings
+	if _, err := vkReq("captchaNotRobot.settings", baseParams); err != nil {
+		return "", fmt.Errorf("settings failed: %w", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Step 2: componentDone
+	browserFp := fmt.Sprintf("%032x", rand.Int63())
+	deviceJSON := `{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1032,"innerWidth":1920,"innerHeight":945,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":16,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"denied"}`
+	componentDoneData := baseParams + fmt.Sprintf("&browser_fp=%s&device=%s", browserFp, neturl.QueryEscape(deviceJSON))
+
+	if _, err := vkReq("captchaNotRobot.componentDone", componentDoneData); err != nil {
+		return "", fmt.Errorf("componentDone failed: %w", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Step 3: check
+	cursorJSON := `[{"x":950,"y":500},{"x":945,"y":510},{"x":940,"y":520},{"x":938,"y":525},{"x":938,"y":525}]`
+	answer := base64.StdEncoding.EncodeToString([]byte("{}"))
+	debugInfo := "d44f534ce8deb56ba20be52e05c433309b49ee4d2a70602deeb17a1954257785"
+
+	checkData := baseParams + fmt.Sprintf(
+		"&accelerometer=%s&gyroscope=%s&motion=%s&cursor=%s&taps=%s&connectionRtt=%s&connectionDownlink=%s&browser_fp=%s&hash=%s&answer=%s&debug_info=%s",
+		neturl.QueryEscape("[]"), neturl.QueryEscape("[]"), neturl.QueryEscape("[]"),
+		neturl.QueryEscape(cursorJSON), neturl.QueryEscape("[]"), neturl.QueryEscape("[]"),
+		neturl.QueryEscape("[9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5]"),
+		browserFp, hash, answer, debugInfo,
+	)
+
+	checkResp, err := vkReq("captchaNotRobot.check", checkData)
+	if err != nil {
+		return "", fmt.Errorf("check failed: %w", err)
+	}
+
+	respObj, ok := checkResp["response"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid check response: %v", checkResp)
+	}
+	status, _ := respObj["status"].(string)
+	if status != "OK" {
+		return "", fmt.Errorf("check status: %s", status)
+	}
+	successToken, ok := respObj["success_token"].(string)
+	if !ok || successToken == "" {
+		return "", fmt.Errorf("success_token not found")
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Step 4: endSession
+	vkReq("captchaNotRobot.endSession", baseParams)
+
+	return successToken, nil
+}
+
+// endregion automatic captcha solver
+
 func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, error) {
+	profile := getRandomProfile()
+	name := generateName()
+	escapedName := neturl.QueryEscape(name)
+
+	log.Printf("Connecting Identity - Name: %s | User-Agent: %s", name, profile.UserAgent)
 
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
-
 		client := &http.Client{
 			Timeout: 20 * time.Second,
 			Transport: &http.Transport{
@@ -47,12 +388,13 @@ func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, 
 			},
 		}
 		defer client.CloseIdleConnections()
+
 		req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(data)))
 		if err != nil {
 			return nil, err
 		}
 
-		req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0")
+		req.Header.Add("User-Agent", profile.UserAgent)
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 		httpResp, err := client.Do(req)
@@ -93,17 +435,65 @@ func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, 
 		return "", "", "", fmt.Errorf("request error:%s", err)
 	}
 
-	token1 := resp["data"].(map[string]interface{})["access_token"].(string)
-
-	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s", link, token1)
-	url = "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
-
-	resp, err = doRequest(data, url)
-	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+	dataMap, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return "", "", "", fmt.Errorf("unexpected anon token response: %v", resp)
+	}
+	token1, ok := dataMap["access_token"].(string)
+	if !ok {
+		return "", "", "", fmt.Errorf("missing access_token in response: %v", resp)
 	}
 
-	token2 := resp["response"].(map[string]interface{})["token"].(string)
+	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, escapedName, token1)
+	url = "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
+
+	var token2 string
+	const maxCaptchaAttempts = 3
+	for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
+		resp, err = doRequest(data, url)
+		if err != nil {
+			return "", "", "", fmt.Errorf("request error:%s", err)
+		}
+
+		// Check for captcha error
+		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
+			errCode, _ := errObj["error_code"].(float64)
+			if errCode == 14 {
+				if attempt == maxCaptchaAttempts {
+					return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
+				}
+
+				captchaErr := parseVkCaptchaError(errObj)
+				if captchaErr.SessionToken != "" {
+					successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr, dialer)
+					if solveErr != nil {
+						return "", "", "", fmt.Errorf("auto captcha solve error: %w", solveErr)
+					}
+
+					if captchaErr.CaptchaAttempt == "0" || captchaErr.CaptchaAttempt == "" {
+						captchaErr.CaptchaAttempt = "1"
+					}
+
+					data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s",
+						link, escapedName, token1, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaErr.CaptchaAttempt)
+					continue
+				} else {
+					return "", "", "", fmt.Errorf("old image captcha detected - not supported in auto solver")
+				}
+			}
+			return "", "", "", fmt.Errorf("VK API error: %v", errObj)
+		}
+
+		respMap, ok := resp["response"].(map[string]interface{})
+		if !ok {
+			return "", "", "", fmt.Errorf("unexpected getAnonymousToken response: %v", resp)
+		}
+		token2, ok = respMap["token"].(string)
+		if !ok {
+			return "", "", "", fmt.Errorf("missing token in response: %v", resp)
+		}
+		break
+	}
 
 	data = fmt.Sprintf("%s%s%s", "session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22", uuid.New(), "%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA")
 	url = "https://calls.okcdn.ru/fb.do"
@@ -137,7 +527,9 @@ func getYandexCreds(link string) (string, string, string, error) {
 	const debug = false
 	const telemostConfHost = "cloud-api.yandex.ru"
 	telemostConfPath := fmt.Sprintf("%s%s%s", "/telemost_front/v2/telemost/conferences/https%3A%2F%2Ftelemost.yandex.ru%2Fj%2F", link, "/connection?next_gen_media_platform_allowed=false")
-	const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0"
+	profile := getRandomProfile()
+	userAgent := profile.UserAgent
+	name := generateName()
 
 	type ConferenceResponse struct {
 		URI                 string `json:"uri"`
@@ -251,13 +643,14 @@ func getYandexCreds(link string) (string, string, string, error) {
 	}
 
 	endpoint := "https://" + telemostConfHost + telemostConfPath
+	tr := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	client := &http.Client{
-		Timeout: 20 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-		},
+		Timeout:   20 * time.Second,
+		Transport: tr,
 	}
 	defer client.CloseIdleConnections()
 	req, err := http.NewRequest("GET", endpoint, nil)
@@ -316,14 +709,14 @@ func getYandexCreds(link string) (string, string, string, error) {
 		UID: uuid.New().String(),
 		Hello: HelloPayload{
 			ParticipantMeta: PartMeta{
-				Name:        "Гость",
+				Name:        name,
 				Role:        "SPEAKER",
 				Description: "",
 				SendAudio:   false,
 				SendVideo:   false,
 			},
 			ParticipantAttributes: PartAttrs{
-				Name:        "Гость",
+				Name:        name,
 				Role:        "SPEAKER",
 				Description: "",
 			},
@@ -451,6 +844,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 }
 
 func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, c chan<- error) {
+	time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
 	var err error = nil
 	defer func() { c <- err }()
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
@@ -479,15 +873,16 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 		log.Printf("Closed DTLS connection\n")
 	}()
 	log.Printf("Established DTLS connection!\n")
-	go func() {
-		for {
+
+	// Trigger the okchan safely to spawn the rest of the threads
+	if okchan != nil {
+		go func() {
 			select {
-			case <-dtlsctx.Done():
-				return
 			case okchan <- struct{}{}:
+			case <-dtlsctx.Done():
 			}
-		}
-	}()
+		}()
+	}
 
 	wg := sync.WaitGroup{}
 	wg.Add(2)
@@ -499,7 +894,7 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 			log.Printf("Failed to set DTLS deadline: %s", err)
 		}
 	})
-	var addr atomic.Value
+
 	// Start read-loop on listenConn
 	go func() {
 		defer wg.Done()
@@ -517,7 +912,7 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 				return
 			}
 
-			addr.Store(addr1) // store peer
+			globalClientWGAddr.Store(addr1) // store local WG peer address globally
 
 			_, err1 = dtlsConn.Write(buf[:n])
 			if err1 != nil {
@@ -543,10 +938,11 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 				log.Printf("Failed: %s", err1)
 				return
 			}
-			addr1, ok := addr.Load().(net.Addr)
+
+			addr1, ok := globalClientWGAddr.Load().(net.Addr)
 			if !ok {
-				log.Printf("Failed: no listener ip")
-				return
+				// Safely drop packet if wireguard hasn't sent an initial packet yet
+				continue
 			}
 
 			_, err1 = listenConn.WriteTo(buf[:n], addr1)
@@ -583,6 +979,7 @@ type turnParams struct {
 }
 
 func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UDPAddr, conn2 net.PacketConn, c chan<- error) {
+	time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
 	var err error = nil
 	defer func() { c <- err }()
 	user, pass, url, err1 := turnParams.getCreds(turnParams.link)
@@ -655,6 +1052,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		STUNServerAddr:         turnServerAddr,
 		TURNServerAddr:         turnServerAddr,
 		Conn:                   turnConn,
+		Net:                    newDirectNet(),
 		Username:               user,
 		Password:               pass,
 		RequestedAddressFamily: addrFamily,
@@ -704,7 +1102,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 			log.Printf("Failed to set upstream deadline: %s", err)
 		}
 	})
-	var addr atomic.Value
+	var internalPipeAddr atomic.Value
 	// Start read-loop on conn2 (output of DTLS)
 	go func() {
 		defer wg.Done()
@@ -722,7 +1120,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 				return
 			}
 
-			addr.Store(addr1) // store peer
+			internalPipeAddr.Store(addr1) // store local async pipe peer
 
 			_, err1 = relayConn.WriteTo(buf[:n], peer)
 			if err1 != nil {
@@ -748,7 +1146,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 				log.Printf("Failed: %s", err1)
 				return
 			}
-			addr1, ok := addr.Load().(net.Addr)
+			addr1, ok := internalPipeAddr.Load().(net.Addr)
 			if !ok {
 				log.Printf("Failed: no listener ip")
 				return
@@ -792,20 +1190,78 @@ func oneTurnConnectionLoop(ctx context.Context, turnParams *turnParams, peer *ne
 		case <-ctx.Done():
 			return
 		case conn2 := <-connchan:
+			// Ensure we block cleanly until the tick signals to proceed
 			select {
 			case <-t:
-				c := make(chan error)
-				go oneTurnConnection(ctx, turnParams, peer, conn2, c)
-				if err := <-c; err != nil {
-					log.Printf("%s", err)
-				}
-			default:
+			case <-ctx.Done():
+				return
+			}
+			c := make(chan error)
+			go oneTurnConnection(ctx, turnParams, peer, conn2, c)
+			if err := <-c; err != nil {
+				log.Printf("%s", err)
 			}
 		}
 	}
 }
 
+type turnCred struct {
+	user, pass, addr string
+}
+
+// poolCreds allows retrieving unique TURN credentials for N distinct connections.
+// Because it natively handles the automatic captcha bypass, every request gets a unique identity safely.
+func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
+	var mu sync.Mutex
+	var pool []turnCred
+	var cTime time.Time
+	var idx int
+
+	return func(link string) (string, string, string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		// Refresh identities every 10 minutes
+		if !cTime.IsZero() && time.Since(cTime) > 10*time.Minute {
+			pool = nil
+			cTime = time.Time{}
+		}
+
+		if len(pool) < poolSize {
+			u, p, a, err := f(link)
+			if err == nil {
+				pool = append(pool, turnCred{u, p, a})
+				cTime = time.Now()
+				log.Printf("Successfully registered User Identity %d/%d", len(pool), poolSize)
+
+				// Space out requests by 1000ms to avoid API limits
+				if len(pool) < poolSize {
+					time.Sleep(1000 * time.Millisecond)
+				}
+
+				c := pool[len(pool)-1]
+				idx++
+				return c.user, c.pass, c.addr, nil
+			}
+
+			log.Printf("Failed to get unique TURN identity: %v", err)
+			if len(pool) > 0 {
+				log.Printf("Falling back to reusing a previous identity...")
+				c := pool[idx%len(pool)]
+				idx++
+				return c.user, c.pass, c.addr, nil
+			}
+			return "", "", "", err
+		}
+
+		c := pool[idx%len(pool)]
+		idx++
+		return c.user, c.pass, c.addr, nil
+	}
+}
+
 func main() { //nolint:cyclop
+	rand.Seed(time.Now().UnixNano())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	signalChan := make(chan os.Signal, 1)
@@ -827,7 +1283,7 @@ func main() { //nolint:cyclop
 	vklink := flag.String("vk-link", "", "VK calls invite link \"https://vk.com/call/join/...\"")
 	yalink := flag.String("yandex-link", "", "Yandex telemost invite link \"https://telemost.yandex.ru/j/...\"")
 	peerAddr := flag.String("peer", "", "peer server address (host:port)")
-	n := flag.Int("n", 0, "connections to TURN (default 16 for VK, 1 for Yandex)")
+	n := flag.Int("n", 0, "connections to TURN (default 10 for VK, 1 for Yandex)")
 	udp := flag.Bool("udp", false, "connect to TURN with UDP")
 	direct := flag.Bool("no-dtls", false, "connect without obfuscation. DO NOT USE")
 	flag.Parse()
@@ -858,7 +1314,7 @@ func main() { //nolint:cyclop
 			return getVkCreds(s, dialer)
 		}
 		if *n <= 0 {
-			*n = 16
+			*n = 10
 		}
 	} else {
 		parts := strings.Split(*yalink, "j/")
@@ -872,11 +1328,11 @@ func main() { //nolint:cyclop
 		link = link[:idx]
 	}
 	params := &turnParams{
-		*host,
-		*port,
-		link,
-		*udp,
-		getCreds,
+		host:     *host,
+		port:     *port,
+		link:     link,
+		udp:      *udp,
+		getCreds: poolCreds(getCreds, *n),
 	}
 
 	listenConnChan := make(chan net.PacketConn)
@@ -903,21 +1359,27 @@ func main() { //nolint:cyclop
 	t := time.Tick(200 * time.Millisecond)
 	if *direct {
 		for i := 0; i < *n; i++ {
-			wg1.Go(func() {
+			wg1.Add(1)
+			go func() {
+				defer wg1.Done()
 				oneTurnConnectionLoop(ctx, params, peer, listenConnChan, t)
-			})
+			}()
 		}
 	} else {
 		okchan := make(chan struct{})
 		connchan := make(chan net.PacketConn)
 
-		wg1.Go(func() {
+		wg1.Add(1)
+		go func() {
+			defer wg1.Done()
 			oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, okchan)
-		})
+		}()
 
-		wg1.Go(func() {
+		wg1.Add(1)
+		go func() {
+			defer wg1.Done()
 			oneTurnConnectionLoop(ctx, params, peer, connchan, t)
-		})
+		}()
 
 		select {
 		case <-okchan:
@@ -925,12 +1387,16 @@ func main() { //nolint:cyclop
 		}
 		for i := 0; i < *n-1; i++ {
 			connchan := make(chan net.PacketConn)
-			wg1.Go(func() {
+			wg1.Add(1)
+			go func() {
+				defer wg1.Done()
 				oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, nil)
-			})
-			wg1.Go(func() {
+			}()
+			wg1.Add(1)
+			go func() {
+				defer wg1.Done()
 				oneTurnConnectionLoop(ctx, params, peer, connchan, t)
-			})
+			}()
 		}
 	}
 
