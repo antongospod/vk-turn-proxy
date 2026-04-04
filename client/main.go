@@ -238,7 +238,11 @@ func fetchPowInput(ctx context.Context, redirectUri string, dialer *dnsdialer.Di
 	if err != nil {
 		return "", 0, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("Failed to close response body: %v", closeErr)
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -300,7 +304,11 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, dialer 
 		if err != nil {
 			return nil, err
 		}
-		defer httpResp.Body.Close()
+		defer func() {
+			if closeErr := httpResp.Body.Close(); closeErr != nil {
+				log.Printf("Failed to close response body: %v", closeErr)
+			}
+		}()
 
 		body, err := io.ReadAll(httpResp.Body)
 		if err != nil {
@@ -365,12 +373,19 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, dialer 
 	time.Sleep(200 * time.Millisecond)
 
 	// Step 4: endSession
-	vkReq("captchaNotRobot.endSession", baseParams)
+	if _, err := vkReq("captchaNotRobot.endSession", baseParams); err != nil {
+		log.Printf("endSession failed: %v", err)
+	}
 
 	return successToken, nil
 }
 
 // endregion automatic captcha solver
+
+var (
+	cachedCaptchaTokenMu sync.Mutex
+	cachedCaptchaToken   string
+)
 
 func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, error) {
 	profile := getRandomProfile()
@@ -446,7 +461,14 @@ func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, 
 		return "", "", "", fmt.Errorf("missing access_token in response: %v", resp)
 	}
 
+	cachedCaptchaTokenMu.Lock()
+	curSuccessToken := cachedCaptchaToken
+	cachedCaptchaTokenMu.Unlock()
+
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, escapedName, token1)
+	if curSuccessToken != "" {
+		data += fmt.Sprintf("&success_token=%s", neturl.QueryEscape(curSuccessToken))
+	}
 	url = "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
 
 	var token2 string
@@ -471,6 +493,10 @@ func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, 
 					if solveErr != nil {
 						return "", "", "", fmt.Errorf("auto captcha solve error: %w", solveErr)
 					}
+
+					cachedCaptchaTokenMu.Lock()
+					cachedCaptchaToken = successToken
+					cachedCaptchaTokenMu.Unlock()
 
 					if captchaErr.CaptchaAttempt == "0" || captchaErr.CaptchaAttempt == "" {
 						captchaErr.CaptchaAttempt = "1"
@@ -1263,7 +1289,6 @@ func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
 }
 
 func main() { //nolint:cyclop
-	rand.Seed(time.Now().UnixNano())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	signalChan := make(chan os.Signal, 1)
@@ -1335,7 +1360,7 @@ func main() { //nolint:cyclop
 		port:     *port,
 		link:     link,
 		udp:      *udp,
-		getCreds: poolCreds(getCreds, *n),
+		getCreds: poolCreds(getCreds, 1),
 	}
 
 	if *tcpMode {
