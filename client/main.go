@@ -1760,8 +1760,8 @@ func (r *relayPacketConn) SetWriteDeadline(t time.Time) error { return r.relay.S
 func pipe(ctx context.Context, c1, c2 net.Conn) {
 	ctx2, cancel := context.WithCancel(ctx)
 	context.AfterFunc(ctx2, func() {
-		c1.SetDeadline(time.Now())
-		c2.SetDeadline(time.Now())
+		_ = c1.SetDeadline(time.Now())
+		_ = c2.SetDeadline(time.Now())
 	})
 
 	var wg sync.WaitGroup
@@ -1769,14 +1769,14 @@ func pipe(ctx context.Context, c1, c2 net.Conn) {
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		io.Copy(c1, c2)
+		_, _ = io.Copy(c1, c2)
 	}()
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		io.Copy(c2, c1)
+		_, _ = io.Copy(c2, c1)
 	}()
 	wg.Wait()
-	c1.SetDeadline(time.Time{})
-	c2.SetDeadline(time.Time{})
+	_ = c1.SetDeadline(time.Time{})
+	_ = c2.SetDeadline(time.Time{})
 }

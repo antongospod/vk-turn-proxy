@@ -63,7 +63,9 @@ func NewKCPOverDTLS(dtlsConn net.Conn, isServer bool) (*kcp.UDPSession, error) {
 		if err != nil {
 			return nil, err
 		}
-		listener.SetDeadline(time.Now().Add(30 * time.Second))
+		if err = listener.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+			return nil, err
+		}
 		sess, err = listener.AcceptKCP()
 		if err != nil {
 			return nil, err
@@ -83,7 +85,6 @@ func NewKCPOverDTLS(dtlsConn net.Conn, isServer bool) (*kcp.UDPSession, error) {
 	sess.SetWindowSize(256, 256)
 	sess.SetMtu(1200) // conservative MTU to fit inside DTLS+TURN
 	sess.SetACKNoDelay(true)
-	sess.SetStreamMode(true)
 
 	return sess, nil
 }
