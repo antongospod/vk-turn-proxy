@@ -432,7 +432,7 @@ func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, client tlscl
 	}
 	domain := parsedURL.Hostname()
 
-	req, err := fhttp.NewRequestWithContext(ctx, "GET", RedirectURI, nil)
+	req, err := fhttp.NewRequestWithContext(ctx, "GET", redirectURI, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -936,7 +936,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 						solveErr = fmt.Errorf("missing fields for auto solve")
 					}
 				case captchaSolveModeSliderPOC:
-					if captchaErr.SessionToken != "" && captchaErr.RedirectUri != "" {
+					if captchaErr.SessionToken != "" && captchaErr.RedirectURI != "" {
 						successToken, solveErr = solveVkCaptcha(ctx, captchaErr, streamID, client, profile, true)
 						if solveErr != nil {
 							log.Printf("[STREAM %d] [Captcha] Auto captcha slider POC failed: %v", streamID, solveErr)
@@ -2215,14 +2215,13 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		return nil, nil, fmt.Errorf("generate cert: %w", err)
 	}
 	dtlsPC := &relayPacketConn{relay: relayConn, peer: peer}
-	dtlsConfig := &dtls.Config{
-		Certificates:          []tls.Certificate{certificate},
-		InsecureSkipVerify:    true,
-		ExtendedMasterSecret:  dtls.RequireExtendedMasterSecret,
-		CipherSuites:          []dtls.CipherSuiteID{dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
-		ConnectionIDGenerator: dtls.OnlySendCIDGenerator(),
-	}
-	dtlsConn, err := dtls.Client(dtlsPC, peer, dtlsConfig)
+	dtlsConn, err := dtls.ClientWithOptions(dtlsPC, peer,
+		dtls.WithCertificates(certificate),
+		dtls.WithInsecureSkipVerify(true),
+		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
+		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
+		dtls.WithConnectionIDGenerator(dtls.OnlySendCIDGenerator()),
+	)
 	if err != nil {
 		cleanup()
 		return nil, nil, fmt.Errorf("DTLS client create: %w", err)
