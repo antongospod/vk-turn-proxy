@@ -236,7 +236,7 @@ type VkCaptchaError struct {
 	ErrorMsg                string
 	CaptchaSid              string
 	CaptchaImg              string
-	RedirectUri             string
+	RedirectURI             string
 	IsSoundCaptchaAvailable bool
 	SessionToken            string
 	CaptchaTs               string
@@ -244,58 +244,96 @@ type VkCaptchaError struct {
 }
 
 func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
-	codeFloat, _ := errData["error_code"].(float64)
-	code := int(codeFloat)
+    // Extract error_code
+    codeFloat, ok := errData["error_code"].(float64)
+    if !ok {
+        log.Printf("missing error_code in captcha error data")
+        return nil
+    }
+    code := int(codeFloat)
 
-	redirectUri, _ := errData["redirect_uri"].(string)
-	captchaSid, _ := errData["captcha_sid"].(string)
-	if captchaSid == "" {
-		if sidNum, ok := errData["captcha_sid"].(float64); ok {
-			captchaSid = fmt.Sprintf("%.0f", sidNum)
-		}
-	}
+    // Extract redirect_uri
+    RedirectURI, ok := errData["redirect_uri"].(string)
+    if !ok {
+        log.Printf("missing redirect_uri in captcha error data")
+        return nil
+    }
 
-	captchaImg, _ := errData["captcha_img"].(string)
-	errorMsg, _ := errData["error_msg"].(string)
+    // Extract captcha_sid
+    captchaSid, ok := errData["captcha_sid"].(string)
+    if !ok {
+        // try numeric
+        if sidNum, ok2 := errData["captcha_sid"].(float64); ok2 {
+            captchaSid = fmt.Sprintf("%.0f", sidNum)
+        } else {
+            log.Printf("missing captcha_sid in captcha error data")
+            return nil
+        }
+    }
 
-	var sessionToken string
-	if redirectUri != "" {
-		if parsed, err := neturl.Parse(redirectUri); err == nil {
-			sessionToken = parsed.Query().Get("session_token")
-		}
-	}
+    // Extract captcha_img
+    captchaImg, ok := errData["captcha_img"].(string)
+    if !ok {
+        log.Printf("missing captcha_img in captcha error data")
+        return nil
+    }
 
-	isSound, _ := errData["is_sound_captcha_available"].(bool)
+    // Extract error_msg
+    errorMsg, ok := errData["error_msg"].(string)
+    if !ok {
+        log.Printf("missing error_msg in captcha error data")
+        return nil
+    }
 
-	var captchaTs string
-	if tsFloat, ok := errData["captcha_ts"].(float64); ok {
-		captchaTs = fmt.Sprintf("%.0f", tsFloat)
-	} else if tsStr, ok := errData["captcha_ts"].(string); ok {
-		captchaTs = tsStr
-	}
+    // Extract session token if redirect_uri present
+    var sessionToken string
+    if RedirectURI != "" {
+        if parsed, err := neturl.Parse(RedirectURI); err == nil {
+            sessionToken = parsed.Query().Get("session_token")
+        } else {
+            log.Printf("failed to parse redirect_uri: %v", err)
+            return nil
+        }
+    }
 
-	var captchaAttempt string
-	if attFloat, ok := errData["captcha_attempt"].(float64); ok {
-		captchaAttempt = fmt.Sprintf("%.0f", attFloat)
-	} else if attStr, ok := errData["captcha_attempt"].(string); ok {
-		captchaAttempt = attStr
-	}
+    // Extract is_sound_captcha_available
+    isSound, ok := errData["is_sound_captcha_available"].(bool)
+    if !ok {
+        isSound = false
+    }
 
-	return &VkCaptchaError{
-		ErrorCode:      code,
-		ErrorMsg:       errorMsg,
-		CaptchaSid:     captchaSid,
-		CaptchaImg:     captchaImg,
-		RedirectUri:    redirectUri,
-		IsSoundCaptchaAvailable: isSound,
-		SessionToken:   sessionToken,
-		CaptchaTs:      captchaTs,
-		CaptchaAttempt: captchaAttempt,
+    // Extract captcha_ts
+    var captchaTs string
+    if tsFloat, ok := errData["captcha_ts"].(float64); ok {
+        captchaTs = fmt.Sprintf("%.0f", tsFloat)
+    } else if tsStr, ok := errData["captcha_ts"].(string); ok {
+        captchaTs = tsStr
+    }
+
+    // Extract captcha_attempt
+    var captchaAttempt string
+    if attFloat, ok := errData["captcha_attempt"].(float64); ok {
+        captchaAttempt = fmt.Sprintf("%.0f", attFloat)
+    } else if attStr, ok := errData["captcha_attempt"].(string); ok {
+        captchaAttempt = attStr
+    }
+
+    // Build VkCaptchaError
+    return &VkCaptchaError{
+        ErrorCode:      code,
+        ErrorMsg:       errorMsg,
+        CaptchaSid:     captchaSid,
+        CaptchaImg:     captchaImg,
+        RedirectURI:    RedirectURI,
+        IsSoundCaptchaAvailable: isSound,
+        SessionToken:   sessionToken,
+        CaptchaTs:      captchaTs,
+        CaptchaAttempt: captchaAttempt,
 	}
 }
 
 func (e *VkCaptchaError) IsCaptchaError() bool {
-	return e.ErrorCode == 14 && e.RedirectUri != "" && e.SessionToken != ""
+	return e.ErrorCode == 14 && e.RedirectURI != "" && e.SessionToken != ""
 }
 
 func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID int, client tlsclient.HttpClient, profile Profile) (string, error) {
@@ -304,11 +342,11 @@ func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID in
 	if captchaErr.SessionToken == "" {
 		return "", fmt.Errorf("no session_token in redirect_uri for auto-solve")
 	}
-	if captchaErr.RedirectUri == "" {
+	if captchaErr.RedirectURI == "" {
 		return "", fmt.Errorf("no redirect_uri for auto-solve")
 	}
 
-	powInput, difficulty, err := fetchPowInput(ctx, captchaErr.RedirectUri, client, profile)
+	powInput, difficulty, err := fetchPowInput(ctx, captchaErr.RedirectURI, client, profile)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch PoW input: %w", err)
 	}
@@ -327,14 +365,14 @@ func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID in
 	return successToken, nil
 }
 
-func fetchPowInput(ctx context.Context, redirectUri string, client tlsclient.HttpClient, profile Profile) (string, int, error) {
-	parsedURL, err := neturl.Parse(redirectUri)
+func fetchPowInput(ctx context.Context, RedirectURI string, client tlsclient.HttpClient, profile Profile) (string, int, error) {
+	parsedURL, err := neturl.Parse(RedirectURI)
 	if err != nil {
 		return "", 0, err
 	}
 	domain := parsedURL.Hostname()
 
-	req, err := fhttp.NewRequestWithContext(ctx, "GET", redirectUri, nil)
+	req, err := fhttp.NewRequestWithContext(ctx, "GET", RedirectURI, nil)
 	if err != nil {
 		return "", 0, err
 	}
@@ -394,7 +432,10 @@ func solvePoW(powInput string, difficulty int) string {
 func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, streamID int, client tlsclient.HttpClient, profile Profile) (string, error) {
 	vkReq := func(method string, postData string) (map[string]interface{}, error) {
 		reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
-		parsedURL, _ := neturl.Parse(reqURL)
+		parsedURL, err := neturl.Parse(reqURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse request URL: %w", err)
+		}
 		domain := parsedURL.Hostname()
 
 		req, err := fhttp.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(postData))
@@ -748,7 +789,10 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	log.Printf("[STREAM %d] [VK Auth] Connecting Identity - Name: %s | User-Agent: %s", streamID, name, profile.UserAgent)
 
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
-		parsedURL, _ := neturl.Parse(url)
+		parsedURL, err := neturl.Parse(url)
+		if err != nil {
+			return nil, fmt.Errorf("parse request URL: %w", err)
+		}
 		domain := parsedURL.Hostname()
 
 		req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer([]byte(data)))
@@ -808,7 +852,10 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 	// Token 1 -> getCallPreview
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&fields=photo_200&access_token=%s", link, token1)
-	_, _ = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id="+creds.ClientID)
+	_, err = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id="+creds.ClientID)
+	if err != nil {
+		log.Printf("[STREAM %d] [VK Auth] Warning: getCallPreview failed: %v", streamID, err)
+	}
 
 	vkDelayRandom(200, 400)
 
@@ -833,7 +880,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 				if attempt < maxAutoAttempts {
 					// Auto Solve Attempts
-					if captchaErr.SessionToken != "" && captchaErr.RedirectUri != "" {
+					if captchaErr.SessionToken != "" && captchaErr.RedirectURI != "" {
 						successToken, solveErr = solveVkCaptcha(ctx, captchaErr, streamID, client, profile)
 						if solveErr != nil {
 							log.Printf("[STREAM %d] [Captcha] Auto solve failed: %v", streamID, solveErr)
@@ -857,8 +904,8 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 					go func() {
 						var t, k string
 						var e error
-						if captchaErr.RedirectUri != "" {
-							t, e = solveCaptchaViaProxy(captchaErr.RedirectUri, dialer)
+						if captchaErr.RedirectURI != "" {
+							t, e = solveCaptchaViaProxy(captchaErr.RedirectURI, dialer)
 						} else if captchaErr.CaptchaImg != "" {
 							k, e = solveCaptchaViaHTTP(captchaErr.CaptchaImg)
 						} else {
@@ -950,7 +997,10 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	if err != nil {
 		return "", "", "", err
 	}
-	token3 := resp["session_key"].(string)
+	token3, ok := resp["session_key"].(string)
+	if !ok {
+    	return "", "", "", fmt.Errorf("missing session_key in response: %v", resp)
+	}
 
 	vkDelayRandom(100, 150)
 
@@ -961,11 +1011,26 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		return "", "", "", err
 	}
 
-	ts := resp["turn_server"].(map[string]interface{})
-	user := ts["username"].(string)
-	pass := ts["credential"].(string)
-	urls := ts["urls"].([]interface{})
-	urlStr := urls[0].(string)
+	tsRaw, ok := resp["turn_server"].(map[string]interface{})
+	if !ok {
+		return "", "", "", fmt.Errorf("missing turn_server in response: %v", resp)
+	}
+	user, ok := tsRaw["username"].(string)
+	if !ok {
+		return "", "", "", fmt.Errorf("missing username in turn_server")
+	}
+	pass, ok := tsRaw["credential"].(string)
+	if !ok {
+		return "", "", "", fmt.Errorf("missing credential in turn_server")
+	}
+	urlsRaw, ok := tsRaw["urls"].([]interface{})
+	if !ok || len(urlsRaw) == 0 {
+		return "", "", "", fmt.Errorf("missing or empty urls in turn_server")
+	}
+	urlStr, ok := urlsRaw[0].(string)
+	if !ok {
+		return "", "", "", fmt.Errorf("turn server url is not a string")
+	}
 
 	clean := strings.Split(urlStr, "?")[0]
 	address := strings.TrimPrefix(strings.TrimPrefix(clean, "turn:"), "turns:")
@@ -1315,7 +1380,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 
 func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, inboundChan <-chan *UDPPacket, connchan chan<- net.PacketConn, okchan chan<- struct{}, streamID int) error {
 	time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
-	var err error
+
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
 	defer dtlscancel()
 
@@ -1353,7 +1418,9 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	context.AfterFunc(dtlsctx, func() {
-		_ = dtlsConn.SetDeadline(time.Now())
+		if err := dtlsConn.SetDeadline(time.Now()); err != nil {
+			log.Printf("[STREAM %d] Warning: SetDeadline failed: %v", streamID, err)
+		}
 	})
 
 	go func() {
@@ -1381,7 +1448,11 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 
 			// Send back to the active WG client
 			if peerAddr := activeLocalPeer.Load(); peerAddr != nil {
-				_, _ = listenConn.WriteTo(buf[:n], peerAddr.(net.Addr))
+				if addr, ok := peerAddr.(net.Addr); ok {
+					if _, err := listenConn.WriteTo(buf[:n], addr); err != nil {
+						log.Printf("[STREAM %d] failed to forward packet to local peer: %v", streamID, err)
+					}
+				}
 			}
 		}
 	}()
@@ -1574,9 +1645,10 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 				continue
 			}
 
-			_, err1 = conn2.WriteTo(buf[:n], addr1.(net.Addr))
-			if err1 != nil {
-				return
+			if addr, ok := addr1.(net.Addr); ok {
+				if _, err := conn2.WriteTo(buf[:n], addr); err != nil {
+					return
+				}
 			}
 		}
 	}()
@@ -1766,7 +1838,12 @@ func main() {
 
 	go func() {
 		for {
-			pkt := packetPool.Get().(*UDPPacket)
+			pktIface := packetPool.Get()
+			pkt, ok := pktIface.(*UDPPacket)
+			if !ok {
+				log.Printf("packetPool returned unexpected type: %T", pktIface)
+				continue
+			}
 			nRead, addr, err := listenConn.ReadFrom(pkt.Data)
 			if err != nil {
 				return
@@ -1774,7 +1851,13 @@ func main() {
 
 			// Save the local WireGuard peer address
 			current := activeLocalPeer.Load()
-			if current == nil || current.(net.Addr).String() != addr.String() {
+			if current == nil {
+				activeLocalPeer.Store(addr)
+			} else if addrStr, ok := current.(net.Addr); ok {
+				if addrStr.String() != addr.String() {
+					activeLocalPeer.Store(addr)
+				}
+			} else {
 				activeLocalPeer.Store(addr)
 			}
 
