@@ -74,6 +74,32 @@ func targetOrigin(targetURL *neturl.URL) string {
 	return targetURL.Scheme + "://" + targetURL.Host
 }
 
+func isSafeLocalRedirectPath(raw string) bool {
+	if raw == "" || raw[0] != '/' {
+		return false
+	}
+	if len(raw) > 1 && (raw[1] == '/' || raw[1] == '\\') {
+		return false
+	}
+	return true
+}
+
+func rewriteProxyRedirectLocation(raw string, targetURL *neturl.URL) (string, bool) {
+	if isSafeLocalRedirectPath(raw) {
+		return raw, true
+	}
+
+	parsed, err := neturl.Parse(raw)
+	if err != nil {
+		return "", false
+	}
+	if !strings.EqualFold(parsed.Scheme, targetURL.Scheme) || !strings.EqualFold(parsed.Host, targetURL.Host) {
+		return "", false
+	}
+
+	return localCaptchaURLForTarget(parsed), true
+}
+
 func rewriteProxyHeaderURL(raw string, targetURL *neturl.URL) string {
 	if raw == "" {
 		return raw
@@ -358,9 +384,10 @@ func runCaptchaServerAndWait(handler http.Handler, captchaURL string, keyCh <-ch
 
 	fmt.Println("\n==============================================")
 	fmt.Println("ACTION REQUIRED: MANUAL CAPTCHA SOLVING NEEDED")
-	fmt.Println("Open this URL in your browser: " + captchaURL)
+	fmt.Println("Open this URL in your browser: " + localCaptchaOrigin())
 	fmt.Println("==============================================")
 	fmt.Println()
+
 	openBrowser(captchaURL)
 
 	key := <-keyCh
@@ -441,10 +468,10 @@ func solveCaptchaViaProxy(redirectURI string, dialer *dnsdialer.Dialer) (string,
 
 			if res.StatusCode >= 300 && res.StatusCode < 400 {
 				if loc := res.Header.Get("Location"); loc != "" {
-					if strings.HasPrefix(loc, "/") {
-						res.Header.Set("Location", loc)
-					} else if strings.HasPrefix(loc, targetOrigin(targetURL)) {
-						res.Header.Set("Location", strings.Replace(loc, targetOrigin(targetURL), localCaptchaOrigin(), 1))
+					if rewritten, ok := rewriteProxyRedirectLocation(loc, targetURL); ok {
+						res.Header.Set("Location", rewritten)
+					} else {
+						res.Header.Del("Location")
 					}
 				}
 			}

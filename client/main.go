@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -22,7 +21,6 @@ import (
 	neturl "net/url"
 	"os"
 	"os/signal"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,7 +66,51 @@ var (
 	handshakeSem         = make(chan struct{}, 3)
 	isDebug              bool
 	manualCaptcha        bool
+	autoCaptchaSliderPOC bool
 )
+
+type captchaSolveMode int
+
+const (
+	captchaSolveModeAuto captchaSolveMode = iota
+	captchaSolveModeSliderPOC
+	captchaSolveModeManual
+)
+
+func captchaSolveModeForAttempt(attempt int, manualOnly bool, enableSliderPOC bool) (captchaSolveMode, bool) {
+	if manualOnly {
+		return captchaSolveModeManual, attempt == 0
+	}
+
+	switch attempt {
+	case 0:
+		return captchaSolveModeAuto, true
+	case 1:
+		if enableSliderPOC {
+			return captchaSolveModeSliderPOC, true
+		}
+		return captchaSolveModeManual, true
+	case 2:
+		if enableSliderPOC {
+			return captchaSolveModeManual, true
+		}
+	}
+
+	return 0, false
+}
+
+func captchaSolveModeLabel(mode captchaSolveMode) string {
+	switch mode {
+	case captchaSolveModeAuto:
+		return "auto captcha"
+	case captchaSolveModeSliderPOC:
+		return "auto captcha slider POC"
+	case captchaSolveModeManual:
+		return "manual captcha"
+	default:
+		return "captcha"
+	}
+}
 
 type UDPPacket struct {
 	Data []byte
@@ -337,8 +379,12 @@ func (e *VkCaptchaError) IsCaptchaError() bool {
 	return e.ErrorCode == 14 && e.RedirectURI != "" && e.SessionToken != ""
 }
 
-func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID int, client tlsclient.HttpClient, profile Profile) (string, error) {
-	log.Printf("[STREAM %d] [Captcha] Solving Not Robot Captcha...", streamID)
+func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID int, client tlsclient.HttpClient, profile Profile, useSliderPOC bool) (string, error) {
+	if useSliderPOC {
+		log.Printf("[STREAM %d] [Captcha] Solving captcha with slider POC...", streamID)
+	} else {
+		log.Printf("[STREAM %d] [Captcha] Solving captcha...", streamID)
+	}
 
 	if captchaErr.SessionToken == "" {
 		return "", fmt.Errorf("no session_token in redirect_uri for auto-solve")
@@ -347,17 +393,30 @@ func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID in
 		return "", fmt.Errorf("no redirect_uri for auto-solve")
 	}
 
-	powInput, difficulty, err := fetchPowInput(ctx, captchaErr.RedirectURI, client, profile)
+	bootstrap, err := fetchCaptchaBootstrap(ctx, captchaErr.RedirectURI, client, profile)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch PoW input: %w", err)
+		return "", fmt.Errorf("failed to fetch captcha bootstrap: %w", err)
 	}
 
-	log.Printf("[STREAM %d] [Captcha] PoW input: %s, difficulty: %d", streamID, powInput, difficulty)
+	log.Printf("[STREAM %d] [Captcha] PoW input: %s, difficulty: %d", streamID, bootstrap.PowInput, bootstrap.Difficulty)
 
-	hash := solvePoW(powInput, difficulty)
+	hash := solvePoW(bootstrap.PowInput, bootstrap.Difficulty)
 	log.Printf("[STREAM %d] [Captcha] PoW solved: hash=%s", streamID, hash)
 
-	successToken, err := callCaptchaNotRobot(ctx, captchaErr.SessionToken, hash, streamID, client, profile)
+	var successToken string
+	if useSliderPOC {
+		successToken, err = callCaptchaNotRobotWithSliderPOC(
+			ctx,
+			captchaErr.SessionToken,
+			hash,
+			streamID,
+			client,
+			profile,
+			bootstrap.Settings,
+		)
+	} else {
+		successToken, err = callCaptchaNotRobot(ctx, captchaErr.SessionToken, hash, streamID, client, profile)
+	}
 	if err != nil {
 		return "", fmt.Errorf("captchaNotRobot API failed: %w", err)
 	}
@@ -366,16 +425,16 @@ func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID in
 	return successToken, nil
 }
 
-func fetchPowInput(ctx context.Context, RedirectURI string, client tlsclient.HttpClient, profile Profile) (string, int, error) {
-	parsedURL, err := neturl.Parse(RedirectURI)
+func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, client tlsclient.HttpClient, profile Profile) (*captchaBootstrap, error) {
+	parsedURL, err := neturl.Parse(redirectURI)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
 	domain := parsedURL.Hostname()
 
 	req, err := fhttp.NewRequestWithContext(ctx, "GET", RedirectURI, nil)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
 
 	req.Host = domain
@@ -387,7 +446,7 @@ func fetchPowInput(ctx context.Context, RedirectURI string, client tlsclient.Htt
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
 	defer func(Body io.ReadCloser) {
 		_ = Body.Close()
@@ -395,26 +454,9 @@ func fetchPowInput(ctx context.Context, RedirectURI string, client tlsclient.Htt
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
-	html := string(body)
-
-	powInputRe := regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
-	powInputMatch := powInputRe.FindStringSubmatch(html)
-	if len(powInputMatch) < 2 {
-		return "", 0, fmt.Errorf("powInput not found in captcha HTML")
-	}
-	powInput := powInputMatch[1]
-
-	diffRe := regexp.MustCompile(`startsWith\('0'\.repeat\((\d+)\)\)`)
-	diffMatch := diffRe.FindStringSubmatch(html)
-	difficulty := 2
-	if len(diffMatch) >= 2 {
-		if d, err := strconv.Atoi(diffMatch[1]); err == nil {
-			difficulty = d
-		}
-	}
-	return powInput, difficulty, nil
+	return parseCaptchaBootstrapHTML(string(body))
 }
 
 func solvePoW(powInput string, difficulty int) string {
@@ -486,7 +528,7 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, streamI
 
 	log.Printf("[STREAM %d] [Captcha] Step 2/4: componentDone", streamID)
 	browserFp := generateBrowserFp(profile)
-	deviceJSON := fmt.Sprintf(`{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1040,"innerWidth":1920,"innerHeight":969,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":8,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"default","userAgent":"%s","platform":"Win32"}`, profile.UserAgent)
+	deviceJSON := buildCaptchaDeviceJSON(profile)
 	componentDoneData := baseParams + fmt.Sprintf("&browser_fp=%s&device=%s", browserFp, neturl.QueryEscape(deviceJSON))
 
 	if _, err := vkReq("captchaNotRobot.componentDone", componentDoneData); err != nil {
@@ -865,11 +907,12 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.275&client_id=%s", creds.ClientID)
 
 	var token2 string
-	maxAutoAttempts := 2
-	if manualCaptcha {
-		maxAutoAttempts = 0
-	}
-	for attempt := 0; attempt <= maxAutoAttempts+1; attempt++ {
+	for attempt := 0; ; attempt++ {
+		solveMode, hasSolveMode := captchaSolveModeForAttempt(attempt, manualCaptcha, autoCaptchaSliderPOC)
+		if !hasSolveMode {
+			break
+		}
+
 		resp, err = doRequest(data, urlAddr)
 		if err != nil {
 			return "", "", "", err
@@ -882,20 +925,27 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 				var captchaKey string
 				var solveErr error
 
-				if attempt < maxAutoAttempts {
-					// Auto Solve Attempts
+				switch solveMode {
+				case captchaSolveModeAuto:
 					if captchaErr.SessionToken != "" && captchaErr.RedirectURI != "" {
-						successToken, solveErr = solveVkCaptcha(ctx, captchaErr, streamID, client, profile)
+						successToken, solveErr = solveVkCaptcha(ctx, captchaErr, streamID, client, profile, false)
 						if solveErr != nil {
-							log.Printf("[STREAM %d] [Captcha] Auto solve failed: %v", streamID, solveErr)
+							log.Printf("[STREAM %d] [Captcha] Auto captcha failed: %v", streamID, solveErr)
 						}
 					} else {
 						solveErr = fmt.Errorf("missing fields for auto solve")
 					}
-				} else if attempt == maxAutoAttempts {
-					// Manual Solve Fallback with 60s Timeout
-					log.Printf("[STREAM %d] [Captcha] Auto failed %d times. Triggering MANUAL fallback...", streamID, maxAutoAttempts)
-
+				case captchaSolveModeSliderPOC:
+					if captchaErr.SessionToken != "" && captchaErr.RedirectUri != "" {
+						successToken, solveErr = solveVkCaptcha(ctx, captchaErr, streamID, client, profile, true)
+						if solveErr != nil {
+							log.Printf("[STREAM %d] [Captcha] Auto captcha slider POC failed: %v", streamID, solveErr)
+						}
+					} else {
+						solveErr = fmt.Errorf("missing fields for slider POC auto solve")
+					}
+				case captchaSolveModeManual:
+					log.Printf("[STREAM %d] [Captcha] Triggering manual captcha fallback...", streamID)
 					manualCtx, manualCancel := context.WithTimeout(ctx, 60*time.Second)
 
 					type manualRes struct {
@@ -927,29 +977,15 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 						solveErr = fmt.Errorf("manual captcha timed out after 60s")
 					}
 					manualCancel()
-				} else {
-					solveErr = fmt.Errorf("max attempts reached")
 				}
 
 				// If solving failed (auto or manual) or timed out
 				if solveErr != nil {
-					log.Printf("[STREAM %d] [Captcha] Failed to solve (attempt %d): %v", streamID, attempt+1, solveErr)
+					log.Printf("[STREAM %d] [Captcha] %s failed (attempt %d): %v", streamID, captchaSolveModeLabel(solveMode), attempt+1, solveErr)
 
-					if attempt < maxAutoAttempts-1 {
-						log.Printf("[STREAM %d] [Captcha] Backing off for 10 seconds before next auto attempt...", streamID)
-						select {
-						case <-ctx.Done():
-							return "", "", "", ctx.Err()
-						case <-time.After(10 * time.Second):
-						}
-						continue
-					} else if attempt == maxAutoAttempts-1 {
-						log.Printf("[STREAM %d] [Captcha] Backing off for 2 seconds before manual fallback...", streamID)
-						select {
-						case <-ctx.Done():
-							return "", "", "", ctx.Err()
-						case <-time.After(2 * time.Second):
-						}
+					nextSolveMode, hasNextSolveMode := captchaSolveModeForAttempt(attempt+1, manualCaptcha, autoCaptchaSliderPOC)
+					if hasNextSolveMode {
+						log.Printf("[STREAM %d] [Captcha] Falling back to %s...", streamID, captchaSolveModeLabel(nextSolveMode))
 						continue
 					}
 
@@ -1354,13 +1390,6 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 	if err != nil {
 		return nil, err
 	}
-	config := &dtls.Config{
-		Certificates:          []tls.Certificate{certificate},
-		InsecureSkipVerify:    true,
-		ExtendedMasterSecret:  dtls.RequireExtendedMasterSecret,
-		CipherSuites:          []dtls.CipherSuiteID{dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
-		ConnectionIDGenerator: dtls.OnlySendCIDGenerator(),
-	}
 
 	select {
 	case handshakeSem <- struct{}{}:
@@ -1371,7 +1400,15 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 
 	ctx1, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	dtlsConn, err := dtls.Client(conn, peer, config)
+	dtlsConn, err := dtls.ClientWithOptions(
+		conn,
+		peer,
+		dtls.WithCertificates(certificate),
+		dtls.WithInsecureSkipVerify(true),
+		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
+		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
+		dtls.WithConnectionIDGenerator(dtls.OnlySendCIDGenerator()),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1778,6 +1815,7 @@ func main() {
 
 	isDebug = *debugFlag
 	manualCaptcha = *manualCaptchaFlag
+	autoCaptchaSliderPOC = !manualCaptcha
 
 	var link string
 	var getCreds getCredsFunc
