@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -486,7 +485,7 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, streamI
 
 	log.Printf("[STREAM %d] [Captcha] Step 2/4: componentDone", streamID)
 	browserFp := generateBrowserFp(profile)
-	deviceJSON := fmt.Sprintf(`{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1040,"innerWidth":1920,"innerHeight":969,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":8,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"default","userAgent":"%s","platform":"Win32"}`, profile.UserAgent)
+	deviceJSON := buildCaptchaDeviceJSON(profile)
 	componentDoneData := baseParams + fmt.Sprintf("&browser_fp=%s&device=%s", browserFp, neturl.QueryEscape(deviceJSON))
 
 	if _, err := vkReq("captchaNotRobot.componentDone", componentDoneData); err != nil {
@@ -1314,13 +1313,6 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 	if err != nil {
 		return nil, err
 	}
-	config := &dtls.Config{
-		Certificates:          []tls.Certificate{certificate},
-		InsecureSkipVerify:    true,
-		ExtendedMasterSecret:  dtls.RequireExtendedMasterSecret,
-		CipherSuites:          []dtls.CipherSuiteID{dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
-		ConnectionIDGenerator: dtls.OnlySendCIDGenerator(),
-	}
 
 	select {
 	case handshakeSem <- struct{}{}:
@@ -1331,7 +1323,15 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 
 	ctx1, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	dtlsConn, err := dtls.Client(conn, peer, config)
+	dtlsConn, err := dtls.ClientWithOptions(
+		conn,
+		peer,
+		dtls.WithCertificates(certificate),
+		dtls.WithInsecureSkipVerify(true),
+		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
+		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
+		dtls.WithConnectionIDGenerator(dtls.OnlySendCIDGenerator()),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1716,7 +1716,6 @@ func main() {
 	direct := flag.Bool("no-dtls", false, "connect without obfuscation. DO NOT USE")
 	debugFlag := flag.Bool("debug", false, "enable debug logging")
 	manualCaptchaFlag := flag.Bool("manual-captcha", false, "skip auto captcha solving, use manual mode immediately")
-	autoCaptchaSliderPOCFlag := flag.Bool("auto-captcha-slider-poc", false, "compatibility flag: slider POC fallback is now enabled by default before manual fallback")
 	flag.Parse()
 	if *peerAddr == "" {
 		log.Panicf("Need peer address!")
@@ -1732,11 +1731,6 @@ func main() {
 	isDebug = *debugFlag
 	manualCaptcha = *manualCaptchaFlag
 	autoCaptchaSliderPOC = !manualCaptcha
-	if *autoCaptchaSliderPOCFlag && manualCaptcha {
-		log.Printf("[Captcha] manual-captcha enabled, ignoring -auto-captcha-slider-poc")
-	} else if *autoCaptchaSliderPOCFlag {
-		log.Printf("[Captcha] -auto-captcha-slider-poc is now enabled by default")
-	}
 
 	var link string
 	var getCreds getCredsFunc

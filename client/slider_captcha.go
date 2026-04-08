@@ -47,15 +47,13 @@ type captchaCheckResult struct {
 	Status          string
 	SuccessToken    string
 	ShowCaptchaType string
-	Redirect        string
 }
 
 type sliderCaptchaContent struct {
-	Extension string
-	Image     image.Image
-	Size      int
-	Steps     []int
-	Attempts  int
+	Image    image.Image
+	Size     int
+	Steps    []int
+	Attempts int
 }
 
 type sliderCandidate struct {
@@ -100,25 +98,11 @@ func (s *captchaNotRobotSession) baseValues() neturl.Values {
 
 func (s *captchaNotRobotSession) request(method string, values neturl.Values) (map[string]interface{}, error) {
 	reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
-	parsedURL, _ := neturl.Parse(reqURL)
-	domain := parsedURL.Hostname()
 
 	req, err := fhttp.NewRequestWithContext(s.ctx, "POST", reqURL, strings.NewReader(values.Encode()))
 	if err != nil {
 		return nil, err
 	}
-
-	req.Host = domain
-	applyBrowserProfileFhttp(req, s.profile)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Origin", "https://id.vk.ru")
-	req.Header.Set("Referer", "https://id.vk.ru/")
-	req.Header.Set("Sec-Fetch-Site", "same-site")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-GPC", "1")
-	req.Header.Set("Priority", "u=1, i")
 
 	httpResp, err := s.client.Do(req)
 	if err != nil {
@@ -169,24 +153,7 @@ func (s *captchaNotRobotSession) requestComponentDone() error {
 }
 
 func (s *captchaNotRobotSession) requestCheckboxCheck() (*captchaCheckResult, error) {
-	values := s.baseValues()
-	values.Set("accelerometer", "[]")
-	values.Set("gyroscope", "[]")
-	values.Set("motion", "[]")
-	values.Set("cursor", "[]")
-	values.Set("taps", "[]")
-	values.Set("connectionRtt", "[]")
-	values.Set("connectionDownlink", "[]")
-	values.Set("browser_fp", s.browserFp)
-	values.Set("hash", s.hash)
-	values.Set("answer", base64.StdEncoding.EncodeToString([]byte("{}")))
-	values.Set("debug_info", captchaDebugInfo)
-
-	resp, err := s.request("captchaNotRobot.check", values)
-	if err != nil {
-		return nil, fmt.Errorf("check failed: %w", err)
-	}
-	return parseCaptchaCheckResult(resp)
+	return s.requestCheck("[]", base64.StdEncoding.EncodeToString([]byte("{}")))
 }
 
 func (s *captchaNotRobotSession) requestSliderContent(sliderSettings string) (*sliderCaptchaContent, error) {
@@ -208,11 +175,15 @@ func (s *captchaNotRobotSession) requestSliderCheck(activeSteps []int, candidate
 		return nil, err
 	}
 
+	return s.requestCheck(generateSliderCursor(candidateIndex, candidateCount), answer)
+}
+
+func (s *captchaNotRobotSession) requestCheck(cursor string, answer string) (*captchaCheckResult, error) {
 	values := s.baseValues()
 	values.Set("accelerometer", "[]")
 	values.Set("gyroscope", "[]")
 	values.Set("motion", "[]")
-	values.Set("cursor", generateSliderCursor(candidateIndex, candidateCount))
+	values.Set("cursor", cursor)
 	values.Set("taps", "[]")
 	values.Set("connectionRtt", "[]")
 	values.Set("connectionDownlink", "[]")
@@ -407,7 +378,7 @@ func parseCaptchaBootstrapHTML(html string) (*captchaBootstrap, error) {
 }
 
 func parseCaptchaSettingsFromHTML(html string) (*captchaSettingsResponse, error) {
-	initRe := regexp.MustCompile(`(?s)window\.init\s*=\s*(\{.*?\})\s*;\s*window\.lang`)
+	initRe := regexp.MustCompile(`(?s)window\.init\s*=\s*(\{.*?})\s*;\s*window\.lang`)
 	initMatch := initRe.FindStringSubmatch(html)
 	if len(initMatch) < 2 {
 		return &captchaSettingsResponse{SettingsByType: make(map[string]string)}, nil
@@ -527,7 +498,6 @@ func parseCaptchaCheckResult(resp map[string]interface{}) (*captchaCheckResult, 
 	result.Status, _ = respObj["status"].(string)
 	result.SuccessToken, _ = respObj["success_token"].(string)
 	result.ShowCaptchaType, _ = respObj["show_captcha_type"].(string)
-	result.Redirect, _ = respObj["redirect"].(string)
 	if result.Status == "" {
 		return nil, fmt.Errorf("check status missing: %v", resp)
 	}
@@ -578,11 +548,10 @@ func parseSliderCaptchaContentResponse(resp map[string]interface{}) (*sliderCapt
 	}
 
 	return &sliderCaptchaContent{
-		Extension: extension,
-		Image:     img,
-		Size:      size,
-		Steps:     swaps,
-		Attempts:  attempts,
+		Image:    img,
+		Size:     size,
+		Steps:    swaps,
+		Attempts: attempts,
 	}, nil
 }
 

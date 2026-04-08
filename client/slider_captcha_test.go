@@ -96,10 +96,10 @@ func TestRenderSliderCandidateMatchesSwapLayout(t *testing.T) {
 	t.Parallel()
 
 	src := image.NewRGBA(image.Rect(0, 0, 20, 20))
-	fillRect(src, image.Rect(0, 0, 10, 10), color.RGBA{255, 0, 0, 255})
-	fillRect(src, image.Rect(10, 0, 20, 10), color.RGBA{0, 255, 0, 255})
-	fillRect(src, image.Rect(0, 10, 10, 20), color.RGBA{0, 0, 255, 255})
-	fillRect(src, image.Rect(10, 10, 20, 20), color.RGBA{255, 255, 0, 255})
+	fillRect(src, image.Rect(0, 0, 10, 10), color.RGBA{R: 255, A: 255})
+	fillRect(src, image.Rect(10, 0, 20, 10), color.RGBA{G: 255, A: 255})
+	fillRect(src, image.Rect(0, 10, 10, 20), color.RGBA{B: 255, A: 255})
+	fillRect(src, image.Rect(10, 10, 20, 20), color.RGBA{R: 255, G: 255, A: 255})
 
 	mapping, err := buildSliderTileMapping(2, []int{0, 1})
 	if err != nil {
@@ -111,10 +111,10 @@ func TestRenderSliderCandidateMatchesSwapLayout(t *testing.T) {
 		t.Fatalf("renderSliderCandidate returned error: %v", err)
 	}
 
-	assertPixelEquals(t, rendered.At(2, 2), color.RGBA{0, 255, 0, 255})
-	assertPixelEquals(t, rendered.At(12, 2), color.RGBA{255, 0, 0, 255})
-	assertPixelEquals(t, rendered.At(2, 12), color.RGBA{0, 0, 255, 255})
-	assertPixelEquals(t, rendered.At(12, 12), color.RGBA{255, 255, 0, 255})
+	assertPixelEquals(t, rendered.At(2, 2), color.RGBA{G: 255, A: 255})
+	assertPixelEquals(t, rendered.At(12, 2), color.RGBA{R: 255, A: 255})
+	assertPixelEquals(t, rendered.At(2, 12), color.RGBA{B: 255, A: 255})
+	assertPixelEquals(t, rendered.At(12, 12), color.RGBA{R: 255, G: 255, A: 255})
 }
 
 func TestRankSliderCandidatesPrefersMostCoherentImage(t *testing.T) {
@@ -228,7 +228,7 @@ func TestParseSliderCaptchaContentResponse(t *testing.T) {
 	t.Parallel()
 
 	src := image.NewRGBA(image.Rect(0, 0, 20, 20))
-	fillRect(src, src.Bounds(), color.RGBA{12, 34, 56, 255})
+	fillRect(src, src.Bounds(), color.RGBA{R: 12, G: 34, B: 56, A: 255})
 
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, src, nil); err != nil {
