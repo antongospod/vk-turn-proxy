@@ -2192,6 +2192,7 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		STUNServerAddr:         turnServerAddr,
 		TURNServerAddr:         turnServerAddr,
 		Conn:                   turnConn,
+		Net:                    directNet{},
 		Username:               user,
 		Password:               pass,
 		RequestedAddressFamily: addrFamily,
