@@ -2046,13 +2046,13 @@ func runVLESSMode(ctx context.Context, tp *turnParams, peer *net.UDPAddr, listen
 	if err != nil {
 		log.Panicf("TCP listen: %s", err)
 	}
-	
+
 	wrappedListener, err := wrapISHListener(listener)
 	if err != nil {
 		log.Printf("Warning: failed to wrap listener: %v", err)
 		wrappedListener = listener
 	}
-	
+
 	context.AfterFunc(ctx, func() { _ = wrappedListener.Close() })
 	log.Printf("VLESS mode: listening on %s (round-robin across %d sessions)", listenAddr, numSessions)
 

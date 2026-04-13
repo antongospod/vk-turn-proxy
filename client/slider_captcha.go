@@ -802,7 +802,6 @@ func renderSliderCandidate(img image.Image, gridSize int, mapping []int) (*image
 	return rendered, nil
 }
 
-
 func sliderTileRect(bounds image.Rectangle, gridSize int, index int) image.Rectangle {
 	row := index / gridSize
 	col := index % gridSize

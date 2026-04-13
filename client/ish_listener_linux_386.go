@@ -1,4 +1,5 @@
 //go:build linux && 386
+
 package main
 
 import (
@@ -26,7 +27,7 @@ func wrapISHListener(ln net.Listener) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Keep a reference to *os.File so the garbage collector doesn't close the FD.
 	return &ishListener{Listener: ln, f: f, fd: int(f.Fd())}, nil
 }
@@ -41,11 +42,11 @@ func (l *ishListener) Accept() (net.Conn, error) {
 	for {
 		addr := make([]byte, 128)
 		addrlen := uintptr(128)
-		
-		// i386 network syscalls are multiplexed via socketcall (102). 
+
+		// i386 network syscalls are multiplexed via socketcall (102).
 		// SYS_ACCEPT is subcall 5.
 		args := [3]uintptr{uintptr(l.fd), uintptr(unsafe.Pointer(&addr[0])), uintptr(unsafe.Pointer(&addrlen))}
-		
+
 		// Use Syscall6 to ensure we have enough arguments registers for the platform.
 		r1, _, errno := syscall.Syscall6(102, 5, uintptr(unsafe.Pointer(&args)), 0, 0, 0, 0)
 		if errno != 0 {
@@ -54,10 +55,10 @@ func (l *ishListener) Accept() (net.Conn, error) {
 			}
 			return nil, errno
 		}
-		
+
 		nfd := int(r1)
-		
-		// We avoid Go's net.FileConn because it tries to register the fd with Go's epoll poller, 
+
+		// We avoid Go's net.FileConn because it tries to register the fd with Go's epoll poller,
 		// which in iSH emulator consistency fails with EEXIST (file exists).
 		// Instead, we return a custom blocking net.Conn wrapper.
 		conn := &ishConn{fd: nfd}
