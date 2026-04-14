@@ -1559,6 +1559,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		return
 	}
 	turnServerAddr = turnServerUDPAddr.String()
+	fmt.Println(turnServerUDPAddr.IP)
 	var cfg *turn.ClientConfig
 	var turnConn net.PacketConn
 	var d net.Dialer
@@ -2162,6 +2163,7 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		return nil, nil, fmt.Errorf("resolve TURN addr: %w", err)
 	}
 	turnServerAddr = turnServerUDPAddr.String()
+	fmt.Println(turnServerUDPAddr.IP)
 
 	// 2. Connect to TURN server
 	var turnConn net.PacketConn
