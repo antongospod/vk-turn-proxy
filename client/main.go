@@ -2078,15 +2078,11 @@ func runVLESSMode(ctx context.Context, tp *turnParams, peer *net.UDPAddr, listen
 		log.Panicf("TCP listen: %s", err)
 	}
 
-<<<<<<< HEAD
 	wrappedListener, err := wrapISHListener(listener)
 	if err != nil {
 		log.Printf("Warning: failed to wrap listener: %v", err)
 		wrappedListener = listener
 	}
-=======
-	wrappedListener := listener
->>>>>>> fix/vk-captcha-checkbox
 
 	context.AfterFunc(ctx, func() { _ = wrappedListener.Close() })
 	log.Printf("VLESS mode: listening on %s (round-robin across %d sessions)", listenAddr, numSessions)
