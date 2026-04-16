@@ -1783,7 +1783,31 @@ func oneTurnConnectionLoop(ctx context.Context, turnParams *turnParams, peer *ne
 	}
 }
 
+func setupGlobalResolver() {
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	dnsServers := []string{"77.88.8.8:53", "77.88.8.1:53", "8.8.8.8:53", "8.8.4.4:53", "1.1.1.1:53", "1.0.0.1:53"}
+
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var lastErr error
+			for _, dns := range dnsServers {
+				conn, err := dialer.DialContext(ctx, "udp", dns)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		},
+	}
+}
+
 func main() {
+	setupGlobalResolver()
 	ctx, cancel := context.WithCancel(context.Background())
 	globalAppCancel = cancel
 	defer cancel()

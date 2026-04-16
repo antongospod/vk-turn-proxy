@@ -361,11 +361,16 @@ func startCaptchaServer(srv *http.Server, logPrefix string) error {
 			continue
 		}
 		listening = true
+		wrappedListener, err := wrapISHListener(listener)
+		if err != nil {
+			log.Printf("%s: failed to wrap listener for iSH: %v", logPrefix, err)
+			wrappedListener = listener
+		}
 		go func(listener net.Listener) {
 			if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("%s: %s", logPrefix, err)
 			}
-		}(listener)
+		}(wrappedListener)
 	}
 
 	if listening {
@@ -385,7 +390,8 @@ func runCaptchaServerAndWait(handler http.Handler, captchaURL string, keyCh <-ch
 
 	fmt.Println("\n==============================================")
 	fmt.Println("ACTION REQUIRED: MANUAL CAPTCHA SOLVING NEEDED")
-	fmt.Println("Open this URL in your browser: " + localCaptchaOrigin())
+	fmt.Println("If your browser didn't open automatically,")
+	fmt.Println("manually open this URL: " + captchaURL)
 	fmt.Println("==============================================")
 	fmt.Println()
 
