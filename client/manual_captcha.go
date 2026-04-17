@@ -18,8 +18,6 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/bschaatsbergen/dnsdialer"
 )
 
 const captchaListenPort = "8765"
@@ -435,19 +433,17 @@ func rewriteCaptchaHTML(html string, targetURL *neturl.URL) string {
 	}
 }
 
-func newCaptchaProxyTransport(dialer *dnsdialer.Dialer) *http.Transport {
-	transport := &http.Transport{
+func newCaptchaProxyTransport() *http.Transport {
+	d := appDialer()
+	return &http.Transport{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     false,
+		DialContext:           d.DialContext,
 	}
-	if dialer != nil {
-		transport.DialContext = dialer.DialContext
-	}
-	return transport
 }
 
 func startCaptchaServer(srv *http.Server, logPrefix string) error {
@@ -607,7 +603,7 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return t.rt.RoundTrip(req)
 }
 
-func solveCaptchaViaProxy(redirectURI string, dialer *dnsdialer.Dialer) (string, error) {
+func solveCaptchaViaProxy(redirectURI string) (string, error) {
 	keyCh := make(chan string, 1)
 
 	targetURL, err := neturl.Parse(redirectURI)
@@ -615,7 +611,7 @@ func solveCaptchaViaProxy(redirectURI string, dialer *dnsdialer.Dialer) (string,
 		return "", fmt.Errorf("invalid redirect URI: %v", err)
 	}
 
-	transport := &loggingTransport{rt: newCaptchaProxyTransport(dialer)}
+	transport := &loggingTransport{rt: newCaptchaProxyTransport()}
 
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
