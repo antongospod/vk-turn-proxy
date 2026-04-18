@@ -491,7 +491,7 @@ func runCaptchaServerAndWait(handler http.Handler, captchaURL string, keyCh <-ch
 	fmt.Println("\n==============================================")
 	fmt.Println("ACTION REQUIRED: MANUAL CAPTCHA SOLVING NEEDED")
 	fmt.Println("If your browser didn't open automatically,")
-	fmt.Println("manually open this URL: " + captchaURL)
+	fmt.Println("manually open this URL: " + localCaptchaOrigin())
 	fmt.Println("==============================================")
 	fmt.Println()
 
