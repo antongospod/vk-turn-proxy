@@ -562,7 +562,11 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	isCaptchaRequest := req.Body != nil && (strings.Contains(req.URL.Path, "captchaNotRobot.check") || strings.Contains(req.URL.Path, "captchaNotRobot.componentDone"))
 
 	if isCaptchaRequest {
-		b, _ := io.ReadAll(req.Body)
+		b, err := io.ReadAll(req.Body)
+		if err != nil {
+			log.Printf("[Captcha Proxy] Failed to read request body: %v", err)
+			b = nil
+		}
 		req.Body = io.NopCloser(bytes.NewReader(b))
 
 		if isDebug {
@@ -573,7 +577,10 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		}
 
 		if strings.Contains(req.URL.Path, "captchaNotRobot.componentDone") || strings.Contains(req.URL.Path, "captchaNotRobot.check") {
-			parsedBody, _ := neturl.ParseQuery(string(b))
+			parsedBody, err := neturl.ParseQuery(string(b))
+			if err != nil {
+				log.Printf("[Captcha Proxy] Failed to parse request body: %v", err)
+			}
 			device := parsedBody.Get("device")
 			browserFp := parsedBody.Get("browser_fp")
 

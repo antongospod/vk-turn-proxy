@@ -384,7 +384,7 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	}
 	// Fallback to top-level session_token field if not in redirect_uri
 	if sessionToken == "" {
-		if st, ok := errData["session_token"].(string); ok {
+		if st, stOk := errData["session_token"].(string); stOk {
 			sessionToken = st
 		}
 	}

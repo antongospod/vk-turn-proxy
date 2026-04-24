@@ -170,8 +170,8 @@ func (s *captchaNotRobotSession) requestComponentDone() error {
 
 	respObj, ok := resp["response"].(map[string]interface{})
 	if ok {
-		if status, _ := respObj["status"].(string); status != "" && status != "OK" {
-			return fmt.Errorf("componentDone status: %s", status)
+		if statusVal, ok := respObj["status"].(string); ok && statusVal != "" && statusVal != "OK" {
+			return fmt.Errorf("componentDone status: %s", statusVal)
 		}
 	}
 
@@ -294,7 +294,8 @@ func callCaptchaNotRobotWithSliderPOC(
 	time.Sleep(200 * time.Millisecond)
 
 	log.Printf("[STREAM %d] [Captcha] Step 2/4: componentDone", streamID)
-	if err := session.requestComponentDone(); err != nil {
+	err = session.requestComponentDone()
+	if err != nil {
 		return "", err
 	}
 
@@ -337,7 +338,8 @@ func callCaptchaNotRobotWithSliderPOC(
 	// VK refuses getContent with ERROR because it expects the widget lifecycle.
 	log.Printf("[STREAM %d] [Captcha] Re-registering slider component before getContent...", streamID)
 	time.Sleep(300 * time.Millisecond)
-	if err := session.requestComponentDone(); err != nil {
+	err = session.requestComponentDone()
+	if err != nil {
 		// Non-fatal: log and continue — getContent may still succeed.
 		log.Printf("[STREAM %d] [Captcha] Warning: slider componentDone failed: %v", streamID, err)
 	}
@@ -401,7 +403,7 @@ func parseCaptchaSettingsResponse(resp map[string]interface{}) (*captchaSettings
 	settings := &captchaSettingsResponse{
 		SettingsByType: make(map[string]string),
 	}
-	settings.ShowCaptchaType, _ = respObj["show_captcha_type"].(string)
+	settings.ShowCaptchaType, _ = respObj["show_captcha_type"].(string) //nolint:errcheck
 
 	rawSettings, ok := expandCaptchaSettings(respObj["captcha_settings"])
 	if !ok {
@@ -414,7 +416,7 @@ func parseCaptchaSettingsResponse(resp map[string]interface{}) (*captchaSettings
 			continue
 		}
 
-		captchaType, _ := item["type"].(string)
+		captchaType, _ := item["type"].(string) //nolint:errcheck
 		if captchaType == "" {
 			continue
 		}
@@ -580,9 +582,9 @@ func parseCaptchaCheckResult(resp map[string]interface{}) (*captchaCheckResult, 
 	}
 
 	result := &captchaCheckResult{}
-	result.Status, _ = respObj["status"].(string)
-	result.SuccessToken, _ = respObj["success_token"].(string)
-	result.ShowCaptchaType, _ = respObj["show_captcha_type"].(string)
+	result.Status, _ = respObj["status"].(string)                     //nolint:errcheck
+	result.SuccessToken, _ = respObj["success_token"].(string)        //nolint:errcheck
+	result.ShowCaptchaType, _ = respObj["show_captcha_type"].(string) //nolint:errcheck
 	if result.Status == "" {
 		return nil, fmt.Errorf("check status missing: %v", resp)
 	}
@@ -596,7 +598,7 @@ func parseSliderCaptchaContentResponse(resp map[string]interface{}) (*sliderCapt
 		return nil, fmt.Errorf("invalid slider content response: %v", resp)
 	}
 
-	status, _ := respObj["status"].(string)
+	status, _ := respObj["status"].(string) //nolint:errcheck
 	if status != "OK" {
 		// Log all fields from the response to help diagnose why VK rejected getContent.
 		var debugFields []string
@@ -610,13 +612,13 @@ func parseSliderCaptchaContentResponse(resp map[string]interface{}) (*sliderCapt
 		return nil, fmt.Errorf("slider getContent status: %s", status)
 	}
 
-	extension, _ := respObj["extension"].(string)
+	extension, _ := respObj["extension"].(string) //nolint:errcheck
 	extension = strings.ToLower(extension)
 	if extension != "jpeg" && extension != "jpg" {
 		return nil, fmt.Errorf("unsupported slider image format: %s", extension)
 	}
 
-	rawImage, _ := respObj["image"].(string)
+	rawImage, _ := respObj["image"].(string) //nolint:errcheck
 	if rawImage == "" {
 		return nil, fmt.Errorf("slider image missing")
 	}
