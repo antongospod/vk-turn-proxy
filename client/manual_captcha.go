@@ -23,6 +23,39 @@ import (
 
 const captchaListenPort = "8765"
 
+// redactSensitiveQueryRe matches values of session_token / access_token /
+// success_token / hash / debug_info inside x-www-form-urlencoded bodies and
+// query strings. We replace the value with "<redacted:N>" so analysts can see
+// presence and length without exposing the JWT itself.
+var redactSensitiveQueryRe = regexp.MustCompile(`(?i)\b(session_token|access_token|success_token|hash|debug_info|browser_fp)=([^&\s]*)`)
+
+// redactURLInPathRe matches an embedded URL inside a Referer-like header where
+// the inner query also contains session_token. We redact it via the same body
+// rule applied to the embedded URL.
+var redactCookieValueRe = regexp.MustCompile(`(remix[a-z]+|prcl|domain_sid)=([^;\s]+)`)
+
+func redactBodyForLog(s string) string {
+	return redactSensitiveQueryRe.ReplaceAllStringFunc(s, func(m string) string {
+		groups := redactSensitiveQueryRe.FindStringSubmatch(m)
+		if len(groups) < 3 {
+			return m
+		}
+		return groups[1] + "=<redacted:" + fmt.Sprint(len(groups[2])) + ">"
+	})
+}
+
+func redactHeaderForLog(name, value string) string {
+	switch strings.ToLower(name) {
+	case "cookie", "set-cookie":
+		return redactCookieValueRe.ReplaceAllString(value, "$1=<redacted>")
+	case "referer", "origin", "location":
+		return redactBodyForLog(value)
+	case "authorization", "proxy-authorization":
+		return "<redacted>"
+	}
+	return value
+}
+
 type browserCommand struct {
 	name string
 	args []string
@@ -126,6 +159,22 @@ func rewriteProxyRequest(req *http.Request, targetURL *neturl.URL) {
 
 	req.Header.Del("Accept-Encoding")
 	req.Header.Del("TE") // Disable transfer encoding compression
+	// Strip WebView identity / fingerprint leak headers. Android WebView
+	// auto-injects X-Requested-With with the host package name, which would
+	// reveal the proxy app to VK.
+	for _, h := range []string{
+		"X-Requested-With",
+		"X-Android-Package",
+		"X-Android-Cert",
+		"X-Client-Data",
+		"X-Discord-Locale",
+		"X-Discord-Timezone",
+		"Save-Data",
+		"Purpose",
+		"Sec-Purpose",
+	} {
+		req.Header.Del(h)
+	}
 	for _, headerName := range []string{"Origin", "Referer"} {
 		if rewritten := rewriteProxyHeaderURL(req.Header.Get(headerName), targetURL); rewritten != "" {
 			req.Header.Set(headerName, rewritten)
@@ -338,12 +387,7 @@ func rewriteCaptchaHTML(html string, targetURL *neturl.URL) string {
     }
 
     function showDone() {
-        document.body.innerHTML = '<div style="text-align:center;margin-top:20vh;font-family:sans-serif">' +
-            '<h2 style="color:#4caf50">✔ Done!</h2>' +
-            '<p>Captcha solved successfully. You can close this tab now.</p>' +
-            '</div>';
-        // On iOS, window.close() often doesn't work, so we just let the user know they are done.
-        setTimeout(function() { window.close(); }, 1000);
+        try { window.close(); } catch (e) {}
     }
 
     var origOpen = XMLHttpRequest.prototype.open;
@@ -600,9 +644,9 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		req.Body = io.NopCloser(bytes.NewReader(b))
 
 		if isDebug {
-			log.Printf("[Captcha Proxy] Real browser sent %s data: %s", req.URL.Path, string(b))
+			log.Printf("[Captcha Proxy] Real browser sent %s data: %s", req.URL.Path, redactBodyForLog(string(b)))
 			for k, v := range req.Header {
-				log.Printf("[Captcha Proxy] Header (%s): %s = %s", req.URL.Path, k, strings.Join(v, ", "))
+				log.Printf("[Captcha Proxy] Header (%s): %s = %s", req.URL.Path, k, redactHeaderForLog(k, strings.Join(v, ", ")))
 			}
 		}
 
