@@ -608,12 +608,27 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, streamI
 	cursorJSON := "[]"
 	answer := base64.StdEncoding.EncodeToString([]byte("{}"))
 
-	// The real browser sends a static SHA-256 hash for debug_info.
-	// We use the exact one captured from the real browser's session.
-	debugInfo := "f3ef768dab7a20f574c6461f34e4257894d2a3c30a53d8727a3edaf7ab70847d"
+	// debug_info must vary per-session — a hardcoded hash becomes a stable
+	// fingerprint that VK uses to flag the bot path (status=BOT).
+	debugInfoBytes := sha256.Sum256([]byte(profile.UserAgent + sessionToken + strconv.FormatInt(time.Now().UnixNano(), 10)))
+	debugInfo := hex.EncodeToString(debugInfoBytes[:])
 
-	connectionRtt := "[250,250,250,250,250]"
-	connectionDownlink := "[1.45,1.45,1.45,1.45,1.45]"
+	// Realistic per-session jitter; static arrays were also a fingerprint.
+	rttSamples := 4 + rand.Intn(4)
+	rttBase := 40 + rand.Intn(120)
+	rttVals := make([]string, rttSamples)
+	for i := range rttVals {
+		rttVals[i] = strconv.Itoa(rttBase + rand.Intn(40) - 20)
+	}
+	connectionRtt := "[" + strings.Join(rttVals, ",") + "]"
+
+	dlSamples := 4 + rand.Intn(4)
+	dlBase := 2.0 + rand.Float64()*8.0
+	dlVals := make([]string, dlSamples)
+	for i := range dlVals {
+		dlVals[i] = strconv.FormatFloat(dlBase+(rand.Float64()-0.5)*0.4, 'f', 2, 64)
+	}
+	connectionDownlink := "[" + strings.Join(dlVals, ",") + "]"
 
 	checkData := baseParams + fmt.Sprintf(
 		"&accelerometer=%s&gyroscope=%s&motion=%s&cursor=%s&taps=%s&connectionRtt=%s&connectionDownlink=%s&browser_fp=%s&hash=%s&answer=%s&debug_info=%s",

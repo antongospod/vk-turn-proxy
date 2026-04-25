@@ -26,6 +26,9 @@ import (
 
 const (
 	dohQueryTimeout     = 6 * time.Second
+	// Total budget across all endpoint attempts in forwardRaw. Must be a
+	// multiple of dohQueryTimeout to give every fallback a real chance.
+	dohForwardBudget = 25 * time.Second
 	dohCacheMinTTL      = 10 * time.Second
 	dohCacheMaxTTL      = 1 * time.Hour
 	dohMaxResponseBytes = 64 * 1024
@@ -120,6 +123,39 @@ func newBootstrapTransport(endpoints []DohEndpoint) *http.Transport {
 					return conn, nil
 				}
 				lastErr = derr
+			}
+			return nil, lastErr
+		},
+		// Explicit DialTLSContext ensures SNI = endpoint hostname even when
+		// the underlying TCP dial targets a bootstrap IP. Without this, some
+		// HTTP/2 paths can leak the literal IP as ServerName and fail TLS.
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, ok := bootstrap[host]
+			if !ok {
+				return nil, fmt.Errorf("doh: no bootstrap IPs for %q", host)
+			}
+			var lastErr error
+			for _, ip := range ips {
+				rawConn, derr := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+				if derr != nil {
+					lastErr = derr
+					continue
+				}
+				tlsConn := tls.Client(rawConn, &tls.Config{
+					MinVersion: tls.VersionTLS12,
+					ServerName: host,
+					NextProtos: []string{"h2", "http/1.1"},
+				})
+				if err := tlsConn.HandshakeContext(ctx); err != nil {
+					_ = rawConn.Close()
+					lastErr = err
+					continue
+				}
+				return tlsConn, nil
 			}
 			return nil, lastErr
 		},
@@ -244,13 +280,22 @@ func parseAnswer(body []byte) ([]net.IP, time.Duration, error) {
 // endpoint that produced it. No parsing — useful for the local forwarder
 // which needs to pass through whatever the upstream resolver answers
 // (RESINFO/HTTPS/SVCB/EDNS options/…).
+//
+// Each endpoint gets its own per-attempt deadline (dohQueryTimeout) so a
+// slow first endpoint does not consume the entire budget and starve the
+// fallbacks. The parent ctx still bounds the total wait via cancel chain.
 func (r *DohResolver) forwardRaw(ctx context.Context, query []byte) ([]byte, DohEndpoint, error) {
 	if len(r.endpoints) == 0 {
 		return nil, DohEndpoint{}, errors.New("doh: no endpoints configured")
 	}
 	var lastErr error
 	for _, ep := range r.endpoints {
-		body, err := r.postWire(ctx, ep, query)
+		if err := ctx.Err(); err != nil {
+			return nil, DohEndpoint{}, err
+		}
+		epCtx, cancel := context.WithTimeout(ctx, dohQueryTimeout)
+		body, err := r.postWire(epCtx, ep, query)
+		cancel()
 		if err != nil {
 			log.Printf("[DoH] %s: %v", ep.Hostname, err)
 			lastErr = err
@@ -395,7 +440,7 @@ func (f *dohForwarder) serveUDP(conn *net.UDPConn, r *DohResolver) {
 		}
 		query := append([]byte(nil), buf[:n]...)
 		go func(q []byte, c *net.UDPAddr) {
-			ctx, cancel := context.WithTimeout(context.Background(), dohQueryTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), dohForwardBudget)
 			defer cancel()
 			resp, _, err := r.forwardRaw(ctx, q)
 			if err != nil {

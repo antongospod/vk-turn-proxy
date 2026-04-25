@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"sync"
 )
 
 type Profile struct {
@@ -19,10 +21,41 @@ type SavedProfile struct {
 	BrowserFp  string
 }
 
-const profileFile = "vk_profile.json"
+const profileFileName = "vk_profile.json"
+
+var (
+	profilePathOnce sync.Once
+	profilePathVal  string
+)
+
+// profileFilePath returns a writeable absolute path for the cached browser
+// profile. Falls back through: $VK_PROFILE_PATH, os.UserCacheDir(),
+// $TMPDIR / os.TempDir(), then CWD as last resort. CWD on Android is the
+// APK lib dir which is read-only, so it must not be the first choice.
+func profileFilePath() string {
+	profilePathOnce.Do(func() {
+		if p := os.Getenv("VK_PROFILE_PATH"); p != "" {
+			profilePathVal = p
+			return
+		}
+		if dir, err := os.UserCacheDir(); err == nil {
+			sub := filepath.Join(dir, "vk-turn-proxy")
+			if mkErr := os.MkdirAll(sub, 0o755); mkErr == nil {
+				profilePathVal = filepath.Join(sub, profileFileName)
+				return
+			}
+		}
+		if tmp := os.TempDir(); tmp != "" {
+			profilePathVal = filepath.Join(tmp, profileFileName)
+			return
+		}
+		profilePathVal = profileFileName
+	})
+	return profilePathVal
+}
 
 func LoadProfileFromDisk() (*SavedProfile, error) {
-	data, err := os.ReadFile(profileFile)
+	data, err := os.ReadFile(profileFilePath())
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +71,7 @@ func SaveProfileToDisk(sp SavedProfile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(profileFile, data, 0644)
+	return os.WriteFile(profileFilePath(), data, 0o644)
 }
 
 // profiles contain paired User-Agent and Client Hints strings to harden bot detection.
