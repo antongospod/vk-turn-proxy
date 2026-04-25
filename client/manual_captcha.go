@@ -681,6 +681,29 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return t.rt.RoundTrip(req)
 }
 
+// genericProxyAllowedSuffixes are upstream host suffixes the WebView is
+// permitted to fetch via /generic_proxy. Anything else is rejected so the
+// loopback proxy cannot be abused as an open SSRF gadget by other local
+// processes or by a malicious page reached through redirects.
+var genericProxyAllowedSuffixes = []string{
+	"vk.com", "vk.ru", "vkuser.net", "vk-cdn.net",
+	"userapi.com", "okcdn.ru",
+	"mc.yandex.ru",
+}
+
+func isAllowedGenericProxyHost(host string) bool {
+	host = strings.ToLower(host)
+	if i := strings.Index(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	for _, suffix := range genericProxyAllowedSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func solveCaptchaViaProxy(redirectURI string) (string, error) {
 	keyCh := make(chan string, 1)
 
@@ -802,6 +825,18 @@ func solveCaptchaViaProxy(redirectURI string) (string, error) {
 		targetParsed, err := neturl.Parse(targetAuthURL)
 		if err != nil || targetParsed.Host == "" {
 			http.Error(w, "Bad URL", http.StatusBadRequest)
+			return
+		}
+		if targetParsed.Scheme != "http" && targetParsed.Scheme != "https" {
+			http.Error(w, "Unsupported scheme", http.StatusBadRequest)
+			return
+		}
+		// Allow the original captcha host plus a small allowlist of VK/Yandex
+		// CDN domains the captcha widget pulls assets from. Anything else
+		// would let the loopback proxy be used as an open SSRF relay.
+		if !strings.EqualFold(targetParsed.Host, targetURL.Host) && !isAllowedGenericProxyHost(targetParsed.Host) {
+			log.Printf("[Captcha Proxy] /generic_proxy rejected host=%s", targetParsed.Host)
+			http.Error(w, "Host not allowed", http.StatusForbidden)
 			return
 		}
 		genericReverse := &httputil.ReverseProxy{

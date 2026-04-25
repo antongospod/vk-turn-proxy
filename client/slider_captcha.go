@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -37,6 +39,7 @@ type captchaNotRobotSession struct {
 	profile      Profile
 	browserFp    string
 	adFp         string
+	debugInfo    string
 	savedProfile *SavedProfile
 }
 
@@ -85,6 +88,10 @@ func newCaptchaNotRobotSession(ctx context.Context, sessionToken, hash string, s
 		browserFp = savedProfile.BrowserFp
 	}
 
+	// Per-session debug_info — a hardcoded hash becomes a stable fingerprint
+	// VK uses to flag the bot path (status=BOT). Mirrors callCaptchaNotRobot.
+	debugInfoBytes := sha256.Sum256([]byte(profile.UserAgent + sessionToken + strconv.FormatInt(time.Now().UnixNano(), 10)))
+
 	return &captchaNotRobotSession{
 		ctx:          ctx,
 		sessionToken: sessionToken,
@@ -94,6 +101,7 @@ func newCaptchaNotRobotSession(ctx context.Context, sessionToken, hash string, s
 		profile:      profile,
 		browserFp:    browserFp,
 		adFp:         generateAdFp(),
+		debugInfo:    hex.EncodeToString(debugInfoBytes[:]),
 		savedProfile: savedProfile,
 	}
 }
@@ -242,21 +250,34 @@ func (s *captchaNotRobotSession) requestSliderCheck(activeSteps []int, candidate
 func (s *captchaNotRobotSession) requestCheck(cursor string, answer string) (*captchaCheckResult, error) {
 	values := s.baseValues()
 
-	// The real browser sends a static SHA-256 hash for debug_info.
-	// We use the exact one captured from the real browser's session.
-	debugInfo := "f3ef768dab7a20f574c6461f34e4257894d2a3c30a53d8727a3edaf7ab70847d"
+	// Per-session jitter on RTT/downlink — static arrays were a fingerprint.
+	rttSamples := 4 + rand.Intn(4)
+	rttBase := 40 + rand.Intn(120)
+	rttVals := make([]string, rttSamples)
+	for i := range rttVals {
+		rttVals[i] = strconv.Itoa(rttBase + rand.Intn(40) - 20)
+	}
+	connectionRtt := "[" + strings.Join(rttVals, ",") + "]"
+
+	dlSamples := 4 + rand.Intn(4)
+	dlBase := 2.0 + rand.Float64()*8.0
+	dlVals := make([]string, dlSamples)
+	for i := range dlVals {
+		dlVals[i] = strconv.FormatFloat(dlBase+(rand.Float64()-0.5)*0.4, 'f', 2, 64)
+	}
+	connectionDownlink := "[" + strings.Join(dlVals, ",") + "]"
 
 	values.Set("accelerometer", "[]")
 	values.Set("gyroscope", "[]")
 	values.Set("motion", "[]")
 	values.Set("cursor", cursor)
 	values.Set("taps", "[]")
-	values.Set("connectionRtt", "[250,250,250,250,250]")
-	values.Set("connectionDownlink", "[1.45,1.45,1.45,1.45,1.45]")
+	values.Set("connectionRtt", connectionRtt)
+	values.Set("connectionDownlink", connectionDownlink)
 	values.Set("browser_fp", s.browserFp)
 	values.Set("hash", s.hash)
 	values.Set("answer", answer)
-	values.Set("debug_info", debugInfo)
+	values.Set("debug_info", s.debugInfo)
 
 	resp, err := s.request("captchaNotRobot.check", values)
 	if err != nil {

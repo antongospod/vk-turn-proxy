@@ -457,7 +457,10 @@ func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID in
 
 	log.Printf("[STREAM %d] [Captcha] PoW input: %s, difficulty: %d", streamID, bootstrap.PowInput, bootstrap.Difficulty)
 
-	hash := solvePoW(bootstrap.PowInput, bootstrap.Difficulty)
+	hash, err := solvePoW(bootstrap.PowInput, bootstrap.Difficulty)
+	if err != nil {
+		return "", fmt.Errorf("PoW: %w", err)
+	}
 	log.Printf("[STREAM %d] [Captcha] PoW solved: hash=%s", streamID, hash)
 
 	var successToken string
@@ -517,17 +520,17 @@ func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, client tlscl
 	return parseCaptchaBootstrapHTML(string(body))
 }
 
-func solvePoW(powInput string, difficulty int) string {
+func solvePoW(powInput string, difficulty int) (string, error) {
 	target := strings.Repeat("0", difficulty)
 	for nonce := 1; nonce <= 10000000; nonce++ {
 		data := powInput + strconv.Itoa(nonce)
 		hash := sha256.Sum256([]byte(data))
 		hexHash := hex.EncodeToString(hash[:])
 		if strings.HasPrefix(hexHash, target) {
-			return hexHash
+			return hexHash, nil
 		}
 	}
-	return ""
+	return "", fmt.Errorf("PoW unsolved (difficulty=%d, tried 10M nonces)", difficulty)
 }
 
 func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, streamID int, client tlsclient.HttpClient, profile Profile, savedProfile *SavedProfile) (string, error) {
@@ -1722,7 +1725,6 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		return
 	}
 	turnServerAddr = turnServerUDPAddr.String()
-	fmt.Println(turnServerUDPAddr.IP)
 	var cfg *turn.ClientConfig
 	var turnConn net.PacketConn
 	var d net.Dialer
@@ -1890,15 +1892,28 @@ func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConn ne
 			return
 		default:
 			err := oneDtlsConnection(ctx, peer, listenConn, inboundChan, connchan, okchan, streamID)
-			if err != nil {
-				if time.Now().Unix() < globalCaptchaLockout.Load() && strings.Contains(err.Error(), "context deadline exceeded") {
-					continue
+			if err == nil {
+				continue
+			}
+			// During captcha lockout the upstream auth path stalls and DTLS
+			// handshakes time out. Wait for the lockout to clear instead of
+			// spinning on `continue`.
+			if lockout := globalCaptchaLockout.Load(); time.Now().Unix() < lockout && strings.Contains(err.Error(), "context deadline exceeded") {
+				wait := time.Until(time.Unix(lockout, 0))
+				if wait < time.Second {
+					wait = time.Second
 				}
 				select {
 				case <-ctx.Done():
 					return
-				case <-time.After(time.Duration(10+rand.Intn(20)) * time.Second):
+				case <-time.After(wait):
 				}
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(10+rand.Intn(20)) * time.Second):
 			}
 		}
 	}
@@ -1955,31 +1970,18 @@ func oneTurnConnectionLoop(ctx context.Context, turnParams *turnParams, peer *ne
 	}
 }
 
-func setupGlobalResolver() {
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-	dnsServers := []string{"77.88.8.8:53", "77.88.8.1:53", "8.8.8.8:53", "8.8.4.4:53", "1.1.1.1:53", "1.0.0.1:53"}
-
-	net.DefaultResolver = &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			var lastErr error
-			for _, dns := range dnsServers {
-				conn, err := dialer.DialContext(ctx, "udp", dns)
-				if err == nil {
-					return conn, nil
-				}
-				lastErr = err
-			}
-			return nil, lastErr
-		},
+// installGlobalResolver wires net.DefaultResolver to the same DNS transport
+// chosen by the -dns flag, so that any caller bypassing appDialer (third-party
+// libs that build their own http.Client without our Dialer) still uses DoH /
+// auto-fallback rather than the OS resolver.
+func installGlobalResolver() {
+	d := appDialer()
+	if d.Resolver != nil {
+		net.DefaultResolver = d.Resolver
 	}
 }
 
 func main() {
-	setupGlobalResolver()
 	ctx, cancel := context.WithCancel(context.Background())
 	globalAppCancel = cancel
 	defer cancel()
@@ -2017,6 +2019,7 @@ func main() {
 		log.Panicf("invalid -dns value %q (expected udp|doh|auto)", *dnsFlag)
 	}
 	log.Printf("[DNS] mode=%s", dnsMode)
+	installGlobalResolver()
 	if *peerAddr == "" {
 		log.Panicf("Need peer address!")
 	}
@@ -2368,7 +2371,6 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		return nil, nil, fmt.Errorf("resolve TURN addr: %w", err)
 	}
 	turnServerAddr = turnServerUDPAddr.String()
-	fmt.Println(turnServerUDPAddr.IP)
 
 	// 2. Connect to TURN server
 	var turnConn net.PacketConn
