@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -169,10 +170,19 @@ var htmlURLAttrDoubleRe = regexp.MustCompile(`(?i)((?:src|href|action)\s*=\s*)"(
 // htmlURLAttrSingleRe matches src/href/action attributes with single-quoted absolute or protocol-relative URLs.
 var htmlURLAttrSingleRe = regexp.MustCompile(`(?i)((?:src|href|action)\s*=\s*)'((?:https?:)?//[^']+)'`)
 
+// scriptBlockRe / styleBlockRe match inline JS/CSS blocks. Go RE2 has no
+// backreferences, so script and style are handled by separate regexes.
+var (
+	scriptBlockRe = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>`)
+	styleBlockRe  = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style\s*>`)
+)
+
 // rewriteHTMLAttrsServerSide rewrites absolute and protocol-relative URLs in src/href/action
 // attributes of raw HTML. URLs matching the upstream origin are redirected to localhost;
 // all other absolute URLs are routed through /generic_proxy so that cross-domain resources
 // (st.vk.com, userapi.com, etc.) load correctly through the proxy.
+// Skips <script> and <style> blocks: their contents are JS/CSS, not HTML attributes,
+// and false matches in inline string literals break the page in WebView.
 func rewriteHTMLAttrsServerSide(html string, targetURL *neturl.URL) string {
 	localOrigin := localCaptchaOrigin()
 	upstreamOrigin := targetOrigin(targetURL)
@@ -194,23 +204,48 @@ func rewriteHTMLAttrsServerSide(html string, targetURL *neturl.URL) string {
 		return "/generic_proxy?proxy_url=" + neturl.QueryEscape(absURL)
 	}
 
-	html = htmlURLAttrDoubleRe.ReplaceAllStringFunc(html, func(match string) string {
-		groups := htmlURLAttrDoubleRe.FindStringSubmatch(match)
-		if len(groups) < 3 {
-			return match
-		}
-		return groups[1] + `"` + rewriteURL(groups[2]) + `"`
-	})
+	rewriteAttrs := func(s string) string {
+		s = htmlURLAttrDoubleRe.ReplaceAllStringFunc(s, func(match string) string {
+			groups := htmlURLAttrDoubleRe.FindStringSubmatch(match)
+			if len(groups) < 3 {
+				return match
+			}
+			return groups[1] + `"` + rewriteURL(groups[2]) + `"`
+		})
+		s = htmlURLAttrSingleRe.ReplaceAllStringFunc(s, func(match string) string {
+			groups := htmlURLAttrSingleRe.FindStringSubmatch(match)
+			if len(groups) < 3 {
+				return match
+			}
+			return groups[1] + `'` + rewriteURL(groups[2]) + `'`
+		})
+		return s
+	}
 
-	html = htmlURLAttrSingleRe.ReplaceAllStringFunc(html, func(match string) string {
-		groups := htmlURLAttrSingleRe.FindStringSubmatch(match)
-		if len(groups) < 3 {
-			return match
-		}
-		return groups[1] + `'` + rewriteURL(groups[2]) + `'`
-	})
+	// Collect ranges of <script> and <style> blocks; merge & sort so the
+	// walker can skip them in a single pass.
+	type span struct{ a, b int }
+	var spans []span
+	for _, m := range scriptBlockRe.FindAllStringIndex(html, -1) {
+		spans = append(spans, span{m[0], m[1]})
+	}
+	for _, m := range styleBlockRe.FindAllStringIndex(html, -1) {
+		spans = append(spans, span{m[0], m[1]})
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].a < spans[j].a })
 
-	return html
+	var b strings.Builder
+	last := 0
+	for _, s := range spans {
+		if s.a < last {
+			continue
+		}
+		b.WriteString(rewriteAttrs(html[last:s.a]))
+		b.WriteString(html[s.a:s.b])
+		last = s.b
+	}
+	b.WriteString(rewriteAttrs(html[last:]))
+	return b.String()
 }
 
 func rewriteCaptchaHTML(html string, targetURL *neturl.URL) string {
@@ -486,8 +521,7 @@ func runCaptchaServerAndWait(handler http.Handler, captchaURL string, keyCh <-ch
 
 	fmt.Println("\n==============================================")
 	fmt.Println("ACTION REQUIRED: MANUAL CAPTCHA SOLVING NEEDED")
-	fmt.Println("If your browser didn't open automatically,")
-	fmt.Println("manually open this URL: " + localCaptchaOrigin())
+	fmt.Println("Open this URL in your browser: " + localCaptchaOrigin())
 	fmt.Println("==============================================")
 	fmt.Println()
 
@@ -547,7 +581,7 @@ button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
 		_, _ = fmt.Fprint(w, `<!DOCTYPE html><html><body><h2>Done!</h2></body></html>`)
 	})
 
-	return runCaptchaServerAndWait(mux, localCaptchaOrigin(), keyCh, "captcha HTTP server error")
+	return runCaptchaServerAndWait(mux, localCaptchaOrigin(), keyCh, "captcha-image")
 }
 
 type loggingTransport struct {
@@ -783,7 +817,7 @@ func solveCaptchaViaProxy(redirectURI string) (string, error) {
 		proxy.ServeHTTP(w, r)
 	})
 
-	return runCaptchaServerAndWait(mux, localCaptchaURLForTarget(targetURL), keyCh, "proxy HTTP server error")
+	return runCaptchaServerAndWait(mux, localCaptchaURLForTarget(targetURL), keyCh, "captcha-proxy")
 }
 
 func openBrowser(url string) {
