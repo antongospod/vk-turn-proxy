@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
+	"github.com/cacggghp/vk-turn-proxy/client/internal/dnsdial"
 	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -135,7 +136,7 @@ func getYandexCreds(link string) (string, string, string, error) {
 	}
 
 	endpoint := "https://" + telemostConfHost + telemostConfPath
-	appD := appDialer()
+	appD := dnsdial.AppDialer()
 	tr := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
@@ -192,7 +193,7 @@ func getYandexCreds(link string) (string, string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	wsAppD := appDialer()
+	wsAppD := dnsdial.AppDialer()
 	dialer := websocket.Dialer{NetDialContext: wsAppD.DialContext}
 	var conn *websocket.Conn
 	conn, resp, err = dialer.DialContext(ctx, data.Wss, h)

@@ -1,7 +1,7 @@
-// DNS-over-HTTPS resolver for mobile networks where UDP/53 is blocked or
-// spoofed.
-
-package main
+// Package dnsdial owns DNS resolution and the net.Dialer wired into all
+// outbound HTTP/TLS clients. Selects between UDP/53, DNS-over-HTTPS, or
+// auto (UDP probe → sticky DoH fallback) based on Mode.
+package dnsdial
 
 import (
 	"bytes"

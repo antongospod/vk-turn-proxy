@@ -1,4 +1,4 @@
-package main
+package dnsdial
 
 import (
 	"context"

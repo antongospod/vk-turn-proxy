@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
+	"github.com/cacggghp/vk-turn-proxy/client/internal/dnsdial"
 	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 )
 
@@ -516,7 +517,7 @@ func rewriteCaptchaHTML(html string, targetURL *neturl.URL) string {
 }
 
 func newCaptchaProxyTransport() *http.Transport {
-	d := appDialer()
+	d := dnsdial.AppDialer()
 	return &http.Transport{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   100,

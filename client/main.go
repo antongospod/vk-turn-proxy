@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
+	"github.com/cacggghp/vk-turn-proxy/client/internal/dnsdial"
 )
 
 type getCredsFunc func(ctx context.Context, link string, streamID int) (string, string, string, error)
@@ -61,16 +62,16 @@ func main() {
 	vlessMode := flag.Bool("vless", false, "VLESS mode: forward TCP connections (for VLESS) instead of UDP packets")
 	debugFlag := flag.Bool("debug", false, "enable debug logging")
 	manualCaptchaFlag := flag.Bool("manual-captcha", false, "skip auto captcha solving, use manual mode immediately")
-	dnsFlag := flag.String("dns", DNSModeAuto, "DNS resolution mode: udp | doh | auto (auto tries UDP/53 first, sticky-fallback to DoH on total failure)")
+	dnsFlag := flag.String("dns", dnsdial.DNSModeAuto, "DNS resolution mode: udp | doh | auto (auto tries UDP/53 first, sticky-fallback to DoH on total failure)")
 	flag.Parse()
 	switch *dnsFlag {
-	case DNSModeUDP, DNSModeDoH, DNSModeAuto:
-		dnsMode = *dnsFlag
+	case dnsdial.DNSModeUDP, dnsdial.DNSModeDoH, dnsdial.DNSModeAuto:
+		dnsdial.Mode = *dnsFlag
 	default:
 		log.Panicf("invalid -dns value %q (expected udp|doh|auto)", *dnsFlag)
 	}
-	log.Printf("[DNS] mode=%s", dnsMode)
-	installGlobalResolver()
+	log.Printf("[DNS] mode=%s", dnsdial.Mode)
+	dnsdial.InstallGlobalResolver()
 	if *peerAddr == "" {
 		log.Panicf("Need peer address!")
 	}
