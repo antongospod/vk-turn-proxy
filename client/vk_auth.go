@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
+	"github.com/cacggghp/vk-turn-proxy/client/internal/captcha"
 	"github.com/cacggghp/vk-turn-proxy/client/internal/dnsdial"
 	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -278,7 +279,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		}
 
 		req.Host = domain
-		applyBrowserProfileFhttp(req, profile)
+		captcha.ApplyBrowserProfileFhttp(req, profile)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Origin", "https://vk.ru")
@@ -348,9 +349,9 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		}
 
 		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
-			captchaErr := ParseVkCaptchaError(errObj)
+			captchaErr := captcha.ParseVkCaptchaError(errObj)
 			if captchaErr != nil && captchaErr.IsCaptchaError() {
-				solveMode, hasSolveMode := captchaSolveModeForAttempt(attempt, appstate.ManualCaptcha, appstate.AutoCaptchaSliderPOC)
+				solveMode, hasSolveMode := captcha.SolveModeForAttempt(attempt, appstate.ManualCaptcha, appstate.AutoCaptchaSliderPOC)
 				if !hasSolveMode {
 					log.Printf("[STREAM %d] [Captcha] No more solve modes available (attempt %d)", streamID, attempt+1)
 
@@ -370,25 +371,25 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 				var solveErr error
 
 				switch solveMode {
-				case captchaSolveModeAuto:
+				case captcha.SolveModeAuto:
 					if captchaErr.SessionToken != "" && captchaErr.RedirectURI != "" {
-						successToken, solveErr = solveVkCaptcha(ctx, captchaErr, streamID, client, profile, false)
+						successToken, solveErr = captcha.SolveVkCaptcha(ctx, captchaErr, streamID, client, profile, false)
 						if solveErr != nil {
 							log.Printf("[STREAM %d] [Captcha] Auto captcha failed: %v", streamID, solveErr)
 						}
 					} else {
 						solveErr = fmt.Errorf("missing fields for auto solve")
 					}
-				case captchaSolveModeSliderPOC:
+				case captcha.SolveModeSliderPOC:
 					if captchaErr.SessionToken != "" && captchaErr.RedirectURI != "" {
-						successToken, solveErr = solveVkCaptcha(ctx, captchaErr, streamID, client, profile, true)
+						successToken, solveErr = captcha.SolveVkCaptcha(ctx, captchaErr, streamID, client, profile, true)
 						if solveErr != nil {
 							log.Printf("[STREAM %d] [Captcha] Auto captcha slider POC failed: %v", streamID, solveErr)
 						}
 					} else {
 						solveErr = fmt.Errorf("missing fields for slider POC auto solve")
 					}
-				case captchaSolveModeManual:
+				case captcha.SolveModeManual:
 					log.Printf("[STREAM %d] [Captcha] Triggering manual captcha fallback...", streamID)
 					// Use context.Background() so that a short deadline on the parent ctx
 					// (e.g. the overall auth timeout) doesn't cut the user's solve time short.
@@ -405,9 +406,9 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 						var t, k string
 						var e error
 						if captchaErr.RedirectURI != "" {
-							t, e = solveCaptchaViaProxy(captchaErr.RedirectURI)
+							t, e = captcha.SolveViaProxy(captchaErr.RedirectURI)
 						} else if captchaErr.CaptchaImg != "" {
-							k, e = solveCaptchaViaHTTP(captchaErr.CaptchaImg)
+							k, e = captcha.SolveViaHTTP(captchaErr.CaptchaImg)
 						} else {
 							e = fmt.Errorf("no redirect_uri or captcha_img")
 						}
@@ -429,7 +430,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 							}
 							log.Printf("[STREAM %d] [Captcha] Successfully got token from browser", streamID)
 						} else if solveErr != nil {
-							log.Printf("[STREAM %d] [Captcha] solveCaptchaViaProxy returned error: %v", streamID, solveErr)
+							log.Printf("[STREAM %d] [Captcha] captcha.SolveViaProxy returned error: %v", streamID, solveErr)
 						}
 					case <-manualCtx.Done():
 						if manualCtx.Err() == context.DeadlineExceeded {
@@ -443,11 +444,11 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 				// If solving failed (auto or manual) or timed out
 				if solveErr != nil {
-					log.Printf("[STREAM %d] [Captcha] %s failed (attempt %d): %v", streamID, captchaSolveModeLabel(solveMode), attempt+1, solveErr)
+					log.Printf("[STREAM %d] [Captcha] %s failed (attempt %d): %v", streamID, captcha.SolveModeLabel(solveMode), attempt+1, solveErr)
 
-					nextSolveMode, hasNextSolveMode := captchaSolveModeForAttempt(attempt+1, appstate.ManualCaptcha, appstate.AutoCaptchaSliderPOC)
+					nextSolveMode, hasNextSolveMode := captcha.SolveModeForAttempt(attempt+1, appstate.ManualCaptcha, appstate.AutoCaptchaSliderPOC)
 					if hasNextSolveMode {
-						log.Printf("[STREAM %d] [Captcha] Falling back to %s...", streamID, captchaSolveModeLabel(nextSolveMode))
+						log.Printf("[STREAM %d] [Captcha] Falling back to %s...", streamID, captcha.SolveModeLabel(nextSolveMode))
 						continue
 					}
 

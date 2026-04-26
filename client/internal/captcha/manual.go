@@ -1,4 +1,4 @@
-package main
+package captcha
 
 import (
 	"bytes"
@@ -22,6 +22,7 @@ import (
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
 	"github.com/cacggghp/vk-turn-proxy/client/internal/dnsdial"
+	"github.com/cacggghp/vk-turn-proxy/client/internal/ishlisten"
 	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 )
 
@@ -540,7 +541,7 @@ func startCaptchaServer(srv *http.Server, logPrefix string) error {
 			continue
 		}
 		listening = true
-		wrappedListener, err := wrapISHListener(listener)
+		wrappedListener, err := ishlisten.Wrap(listener)
 		if err != nil {
 			log.Printf("%s: failed to wrap listener for iSH: %v", logPrefix, err)
 			wrappedListener = listener
@@ -601,7 +602,7 @@ func notifyKey(keyCh chan<- string, key string) {
 	}
 }
 
-func solveCaptchaViaHTTP(captchaImg string) (string, error) {
+func SolveViaHTTP(captchaImg string) (string, error) {
 	keyCh := make(chan string, 1)
 	mux := http.NewServeMux()
 
@@ -708,7 +709,7 @@ func isAllowedGenericProxyHost(host string) bool {
 	return false
 }
 
-func solveCaptchaViaProxy(redirectURI string) (string, error) {
+func SolveViaProxy(redirectURI string) (string, error) {
 	keyCh := make(chan string, 1)
 
 	targetURL, err := neturl.Parse(redirectURI)

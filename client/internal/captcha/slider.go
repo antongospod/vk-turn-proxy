@@ -1,4 +1,4 @@
-package main
+package captcha
 
 import (
 	"bytes"
@@ -125,7 +125,7 @@ func (s *captchaNotRobotSession) request(method string, values neturl.Values) (m
 	}
 
 	// Match the headers that the real VK captcha JS sends, same as callCaptchaNotRobot.
-	applyBrowserProfileFhttp(req, s.profile)
+	ApplyBrowserProfileFhttp(req, s.profile)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Origin", "https://api.vk.ru")

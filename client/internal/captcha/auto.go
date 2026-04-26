@@ -1,4 +1,7 @@
-package main
+// Package captcha contains all VK captcha solver implementations:
+// auto (PoW + bot-detector pings), slider PoC (image-puzzle attempt), and
+// manual (reverse-proxy WebView for human input). Selected via SolveMode.
+package captcha
 
 import (
 	"context"
@@ -22,51 +25,51 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 )
 
-type captchaSolveMode int
+type SolveMode int
 
 const (
-	captchaSolveModeAuto captchaSolveMode = iota
-	captchaSolveModeSliderPOC
-	captchaSolveModeManual
+	SolveModeAuto SolveMode = iota
+	SolveModeSliderPOC
+	SolveModeManual
 )
 
-func captchaSolveModeForAttempt(attempt int, manualOnly bool, enableSliderPOC bool) (captchaSolveMode, bool) {
+func SolveModeForAttempt(attempt int, manualOnly bool, enableSliderPOC bool) (SolveMode, bool) {
 	if manualOnly {
-		return captchaSolveModeManual, attempt == 0
+		return SolveModeManual, attempt == 0
 	}
 
 	switch attempt {
 	case 0:
-		return captchaSolveModeAuto, true
+		return SolveModeAuto, true
 	case 1:
 		if enableSliderPOC {
-			return captchaSolveModeSliderPOC, true
+			return SolveModeSliderPOC, true
 		}
-		return captchaSolveModeManual, true
+		return SolveModeManual, true
 	case 2:
 		if enableSliderPOC {
-			return captchaSolveModeManual, true
+			return SolveModeManual, true
 		}
 	}
 
 	return 0, false
 }
 
-func captchaSolveModeLabel(mode captchaSolveMode) string {
+func SolveModeLabel(mode SolveMode) string {
 	switch mode {
-	case captchaSolveModeAuto:
+	case SolveModeAuto:
 		return "auto captcha"
-	case captchaSolveModeSliderPOC:
+	case SolveModeSliderPOC:
 		return "auto captcha slider POC"
-	case captchaSolveModeManual:
+	case SolveModeManual:
 		return "manual captcha"
 	default:
 		return "captcha"
 	}
 }
 
-// applyBrowserProfile applies consistent User-Agent and Client Hints to bypass WAFs
-func applyBrowserProfile(req *http.Request, profile prof.Profile) {
+// ApplyBrowserProfile applies consistent User-Agent and Client Hints to bypass WAFs
+func ApplyBrowserProfile(req *http.Request, profile prof.Profile) {
 	req.Header.Set("User-Agent", profile.UserAgent)
 	req.Header.Set("sec-ch-ua", profile.SecChUa)
 	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)
@@ -75,7 +78,7 @@ func applyBrowserProfile(req *http.Request, profile prof.Profile) {
 	req.Header.Set("DNT", "1")
 }
 
-func applyBrowserProfileFhttp(req *fhttp.Request, profile prof.Profile) {
+func ApplyBrowserProfileFhttp(req *fhttp.Request, profile prof.Profile) {
 	req.Header.Set("User-Agent", profile.UserAgent)
 	req.Header.Set("sec-ch-ua", profile.SecChUa)
 	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)
@@ -203,7 +206,7 @@ func (e *VkCaptchaError) IsCaptchaError() bool {
 	return e.ErrorCode == 14 && e.RedirectURI != "" && e.SessionToken != ""
 }
 
-func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID int, client tlsclient.HttpClient, profile prof.Profile, useSliderPOC bool) (string, error) {
+func SolveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID int, client tlsclient.HttpClient, profile prof.Profile, useSliderPOC bool) (string, error) {
 	if useSliderPOC {
 		log.Printf("[STREAM %d] [Captcha] Solving captcha with slider POC...", streamID)
 	} else {
@@ -274,7 +277,7 @@ func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, client tlscl
 	}
 
 	req.Host = domain
-	applyBrowserProfileFhttp(req, profile)
+	ApplyBrowserProfileFhttp(req, profile)
 	req.Header.Set("Sec-Fetch-Site", "none")
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
 	req.Header.Set("Sec-Fetch-Dest", "document")
@@ -323,7 +326,7 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, streamI
 		}
 
 		req.Host = domain
-		applyBrowserProfileFhttp(req, profile)
+		ApplyBrowserProfileFhttp(req, profile)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Origin", "https://api.vk.ru")

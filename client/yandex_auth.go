@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
+	"github.com/cacggghp/vk-turn-proxy/client/internal/captcha"
 	"github.com/cacggghp/vk-turn-proxy/client/internal/dnsdial"
 	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 	"github.com/google/uuid"
@@ -153,7 +154,7 @@ func getYandexCreds(link string) (string, string, string, error) {
 		return "", "", "", err
 	}
 
-	applyBrowserProfile(req, profile)
+	captcha.ApplyBrowserProfile(req, profile)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Referer", "https://telemost.yandex.ru/")
 	req.Header.Set("Origin", "https://telemost.yandex.ru")

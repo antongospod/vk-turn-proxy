@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
+	"github.com/cacggghp/vk-turn-proxy/client/internal/ishlisten"
 	"github.com/cacggghp/vk-turn-proxy/client/internal/netadapt"
 	"github.com/cacggghp/vk-turn-proxy/tcputil"
 	"github.com/pion/dtls/v3"
@@ -99,7 +100,7 @@ func runVLESSMode(ctx context.Context, tp *turnParams, peer *net.UDPAddr, listen
 		log.Panicf("TCP listen: %s", err)
 	}
 
-	wrappedListener, err := wrapISHListener(listener)
+	wrappedListener, err := ishlisten.Wrap(listener)
 	if err != nil {
 		log.Printf("Warning: failed to wrap listener: %v", err)
 		wrappedListener = listener

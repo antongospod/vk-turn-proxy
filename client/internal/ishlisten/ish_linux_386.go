@@ -1,6 +1,6 @@
 //go:build linux && 386
 
-package main
+package ishlisten
 
 import (
 	"net"
@@ -16,9 +16,9 @@ type ishListener struct {
 	fd int
 }
 
-// wrapISHListener overrides the standard net.Listener with a legacy syscall listener
+// Wrap overrides the standard net.Listener with a legacy syscall listener
 // designed specifically for the iSH simulator on iOS, which lacks modern `accept4`.
-func wrapISHListener(ln net.Listener) (net.Listener, error) {
+func Wrap(ln net.Listener) (net.Listener, error) {
 	tl, ok := ln.(*net.TCPListener)
 	if !ok {
 		return ln, nil
