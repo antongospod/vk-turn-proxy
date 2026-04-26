@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 )
@@ -65,7 +66,7 @@ func captchaSolveModeLabel(mode captchaSolveMode) string {
 }
 
 // applyBrowserProfile applies consistent User-Agent and Client Hints to bypass WAFs
-func applyBrowserProfile(req *http.Request, profile Profile) {
+func applyBrowserProfile(req *http.Request, profile prof.Profile) {
 	req.Header.Set("User-Agent", profile.UserAgent)
 	req.Header.Set("sec-ch-ua", profile.SecChUa)
 	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)
@@ -74,7 +75,7 @@ func applyBrowserProfile(req *http.Request, profile Profile) {
 	req.Header.Set("DNT", "1")
 }
 
-func applyBrowserProfileFhttp(req *fhttp.Request, profile Profile) {
+func applyBrowserProfileFhttp(req *fhttp.Request, profile prof.Profile) {
 	req.Header.Set("User-Agent", profile.UserAgent)
 	req.Header.Set("sec-ch-ua", profile.SecChUa)
 	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)
@@ -83,7 +84,7 @@ func applyBrowserProfileFhttp(req *fhttp.Request, profile Profile) {
 	req.Header.Set("DNT", "1")
 }
 
-func generateBrowserFp(profile Profile) string {
+func generateBrowserFp(profile prof.Profile) string {
 	// Fallback logic for generating a fingerprint if no saved profile is available.
 	// This uses a simple MD5 hash of UA and a fixed resolution.
 	data := profile.UserAgent + profile.SecChUa + "1536x864x24"
@@ -202,7 +203,7 @@ func (e *VkCaptchaError) IsCaptchaError() bool {
 	return e.ErrorCode == 14 && e.RedirectURI != "" && e.SessionToken != ""
 }
 
-func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID int, client tlsclient.HttpClient, profile Profile, useSliderPOC bool) (string, error) {
+func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID int, client tlsclient.HttpClient, profile prof.Profile, useSliderPOC bool) (string, error) {
 	if useSliderPOC {
 		log.Printf("[STREAM %d] [Captcha] Solving captcha with slider POC...", streamID)
 	} else {
@@ -217,8 +218,8 @@ func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID in
 	}
 
 	// Try to load saved profile from disk
-	var savedProfile *SavedProfile
-	if sp, err := LoadProfileFromDisk(); err == nil {
+	var savedProfile *prof.SavedProfile
+	if sp, err := prof.LoadProfileFromDisk(); err == nil {
 		log.Printf("[STREAM %d] [Captcha] Using saved real browser profile", streamID)
 		savedProfile = sp
 		profile = sp.Profile // Use saved headers/UA
@@ -260,7 +261,7 @@ func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID in
 	return successToken, nil
 }
 
-func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, client tlsclient.HttpClient, profile Profile) (*captchaBootstrap, error) {
+func fetchCaptchaBootstrap(ctx context.Context, redirectURI string, client tlsclient.HttpClient, profile prof.Profile) (*captchaBootstrap, error) {
 	parsedURL, err := neturl.Parse(redirectURI)
 	if err != nil {
 		return nil, err
@@ -307,7 +308,7 @@ func solvePoW(powInput string, difficulty int) (string, error) {
 	return "", fmt.Errorf("PoW unsolved (difficulty=%d, tried 10M nonces)", difficulty)
 }
 
-func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, streamID int, client tlsclient.HttpClient, profile Profile, savedProfile *SavedProfile) (string, error) {
+func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, streamID int, client tlsclient.HttpClient, profile prof.Profile, savedProfile *prof.SavedProfile) (string, error) {
 	vkReq := func(method string, postData string) (map[string]interface{}, error) {
 		reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
 		parsedURL, err := neturl.Parse(reqURL)

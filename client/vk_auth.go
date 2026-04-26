@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
+	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
@@ -241,7 +242,7 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 }
 
 func getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar) (string, string, string, error) {
-	profile := Profile{
+	profile := prof.Profile{
 		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
 		SecChUa:         `"Not(A:Brand";v="99", "Google Chrome";v="146", "Chromium";v="146"`,
 		SecChUaMobile:   "?0",
@@ -258,7 +259,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		return "", "", "", fmt.Errorf("failed to initialize tls_client: %w", err)
 	}
 
-	name := generateName()
+	name := prof.GenerateName()
 	escapedName := neturl.QueryEscape(name)
 
 	log.Printf("[STREAM %d] [VK Auth] Connecting Identity - Name: %s | User-Agent: %s", streamID, name, profile.UserAgent)

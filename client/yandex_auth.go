@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cacggghp/vk-turn-proxy/client/internal/appstate"
+	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
@@ -19,8 +20,8 @@ func getYandexCreds(link string) (string, string, string, error) {
 	const telemostConfHost = "cloud-api.yandex.ru"
 	telemostConfPath := fmt.Sprintf("%s%s%s", "/telemost_front/v2/telemost/conferences/https%3A%2F%2Ftelemost.yandex.ru%2Fj%2F", link, "/connection?next_gen_media_platform_allowed=false")
 
-	profile := getRandomProfile()
-	name := generateName()
+	profile := prof.GetRandomProfile()
+	name := prof.GenerateName()
 
 	type ConferenceResponse struct {
 		URI                 string `json:"uri"`

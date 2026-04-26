@@ -1,4 +1,4 @@
-package main
+package profile
 
 import (
 	"fmt"
@@ -162,7 +162,7 @@ func convertToFemaleSurname(surname string) string {
 	return surname
 }
 
-func generateName() string {
+func GenerateName() string {
 	// Decide gender first
 	isFemale := rand.Intn(2) == 0
 

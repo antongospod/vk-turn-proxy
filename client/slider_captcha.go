@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	prof "github.com/cacggghp/vk-turn-proxy/client/internal/profile"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 )
@@ -36,11 +37,11 @@ type captchaNotRobotSession struct {
 	hash         string
 	streamID     int
 	client       tlsclient.HttpClient
-	profile      Profile
+	profile      prof.Profile
 	browserFp    string
 	adFp         string
 	debugInfo    string
-	savedProfile *SavedProfile
+	savedProfile *prof.SavedProfile
 }
 
 func generateAdFp() string {
@@ -82,7 +83,7 @@ type captchaBootstrap struct {
 	Settings   *captchaSettingsResponse
 }
 
-func newCaptchaNotRobotSession(ctx context.Context, sessionToken, hash string, streamID int, client tlsclient.HttpClient, profile Profile, savedProfile *SavedProfile) *captchaNotRobotSession {
+func newCaptchaNotRobotSession(ctx context.Context, sessionToken, hash string, streamID int, client tlsclient.HttpClient, profile prof.Profile, savedProfile *prof.SavedProfile) *captchaNotRobotSession {
 	browserFp := generateBrowserFp(profile)
 	if savedProfile != nil {
 		browserFp = savedProfile.BrowserFp
@@ -299,9 +300,9 @@ func callCaptchaNotRobotWithSliderPOC(
 	hash string,
 	streamID int,
 	client tlsclient.HttpClient,
-	profile Profile,
+	profile prof.Profile,
 	initialSettings *captchaSettingsResponse,
-	savedProfile *SavedProfile,
+	savedProfile *prof.SavedProfile,
 ) (string, error) {
 	session := newCaptchaNotRobotSession(ctx, sessionToken, hash, streamID, client, profile, savedProfile)
 
@@ -406,7 +407,7 @@ func callCaptchaNotRobotWithSliderPOC(
 	return successToken, nil
 }
 
-func buildCaptchaDeviceJSON(profile Profile) string {
+func buildCaptchaDeviceJSON(profile prof.Profile) string {
 	// Fallback device JSON if no saved profile is available.
 	// We include the User-Agent from the current profile to maintain some consistency.
 	return fmt.Sprintf(

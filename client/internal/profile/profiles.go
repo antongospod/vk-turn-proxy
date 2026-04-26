@@ -1,4 +1,7 @@
-package main
+// Package profile provides browser fingerprint profiles (UA + Client Hints)
+// and on-disk persistence of the captured profile after a successful manual
+// captcha session.
+package profile
 
 import (
 	"encoding/json"
@@ -140,7 +143,7 @@ var profileList = []Profile{
 	},
 }
 
-// getRandomProfile returns a paired User-Agent and Client Hints profile.
-func getRandomProfile() Profile {
+// GetRandomProfile returns a paired User-Agent and Client Hints profile.
+func GetRandomProfile() Profile {
 	return profileList[rand.Intn(len(profileList))]
 }
