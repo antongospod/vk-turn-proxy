@@ -361,10 +361,9 @@ func oneTurnConnection(ctx context.Context, params *Params, peer *net.UDPAddr, c
 		}
 	})
 
-	var internalPipeAddr atomic.Value
-
 	// Inbound goroutine factory: per-relay reader feeding decrypted-side conn2.
 	var inboundWg sync.WaitGroup
+	dummyAddr := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
 	spawnInbound := func(relay net.PacketConn) {
 		inboundWg.Add(1)
 		go func() {
@@ -376,14 +375,12 @@ func oneTurnConnection(ctx context.Context, params *Params, peer *net.UDPAddr, c
 				if err1 != nil {
 					return
 				}
-				addr1 := internalPipeAddr.Load()
-				if addr1 == nil {
-					continue
-				}
-				if addr, ok := addr1.(net.Addr); ok {
-					if _, err := conn2.WriteTo(buf[:n], addr); err != nil {
-						return
-					}
+				// Write to the AsyncPacketPipe (which ignores the dummy address).
+				// We don't need to wait for outbound packets to establish an address,
+				// which was causing incoming proxy server responses to be dropped
+				// on multi-link setups where some streams only receive packets.
+				if _, err := conn2.WriteTo(buf[:n], dummyAddr); err != nil {
+					return
 				}
 			}
 		}()
@@ -398,14 +395,13 @@ func oneTurnConnection(ctx context.Context, params *Params, peer *net.UDPAddr, c
 			if turnctx.Err() != nil {
 				return
 			}
-			n, addr1, err1 := conn2.ReadFrom(buf)
+			n, _, err1 := conn2.ReadFrom(buf)
 			if err1 != nil {
 				return
 			}
 			if turnctx.Err() != nil {
 				return
 			}
-			internalPipeAddr.Store(addr1)
 
 			r := pool.pick()
 			if r == nil {
