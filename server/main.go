@@ -129,8 +129,9 @@ func main() {
 }
 
 type dtlsConnWrapper struct {
-	conn net.Conn
-	tx   chan []byte
+	conn       net.Conn
+	tx         chan []byte
+	lastActive atomic.Int64
 }
 
 type dtlsPool struct {
@@ -201,6 +202,16 @@ func (p *dtlsPool) pick() *dtlsConnWrapper {
 	if n == 0 {
 		return nil
 	}
+
+	now := time.Now().Unix()
+	for attempts := 0; attempts < int(n); attempts++ {
+		i := atomic.AddUint64(&p.idx, 1) - 1
+		c := p.conns[i%n]
+		if now-c.lastActive.Load() < 60 {
+			return c
+		}
+	}
+
 	i := atomic.AddUint64(&p.idx, 1) - 1
 	return p.conns[i%n]
 }
@@ -210,6 +221,7 @@ func (p *dtlsPool) handleConn(ctx context.Context, conn net.Conn) {
 		conn: conn,
 		tx:   make(chan []byte, 128),
 	}
+	w.lastActive.Store(time.Now().Unix())
 
 	p.mu.Lock()
 	p.conns = append(p.conns, w)
@@ -258,7 +270,7 @@ func (p *dtlsPool) handleConn(ctx context.Context, conn net.Conn) {
 		default:
 		}
 
-		if err := conn.SetReadDeadline(time.Now().Add(time.Minute * 30)); err != nil {
+		if err := conn.SetReadDeadline(time.Now().Add(time.Minute * 2)); err != nil {
 			log.Printf("conn SetReadDeadline err: %v", err)
 			return
 		}
@@ -268,6 +280,7 @@ func (p *dtlsPool) handleConn(ctx context.Context, conn net.Conn) {
 			log.Printf("conn Read err: %v", err)
 			return
 		}
+		w.lastActive.Store(time.Now().Unix())
 
 		// Write to shared WireGuard connection.
 		// UDP Write is non-blocking, no need for concurrent SetWriteDeadline calls
