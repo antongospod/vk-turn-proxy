@@ -155,6 +155,7 @@ type Params struct {
 	UDP      bool
 	GetCreds GetCredsFunc
 	Cfg      *appcfg.Config
+	counter  atomic.Uint64
 }
 
 // PickLink chooses a link for given streamID via round-robin shard.
@@ -163,7 +164,7 @@ func (p *Params) PickLink(streamID int) string {
 	if len(p.Links) == 0 {
 		return ""
 	}
-	idx := streamID % len(p.Links)
+	idx := int(p.counter.Add(1)-1) % len(p.Links)
 	if idx < 0 {
 		idx += len(p.Links)
 	}
