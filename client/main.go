@@ -56,6 +56,7 @@ func main() {
 	debugFlag := flag.Bool("debug", false, "enable debug logging")
 	manualCaptchaFlag := flag.Bool("manual-captcha", false, "skip auto captcha solving, use manual mode immediately")
 	dnsFlag := flag.String("dns", dnsdial.DNSModeAuto, "DNS resolution mode: udp | doh | auto (auto tries UDP/53 first, sticky-fallback to DoH on total failure)")
+	allocsFlag := flag.Int("allocs-per-stream", 1, "open this many TURN allocations per stream under shared creds (variant A — only useful if VK throttles per-allocation)")
 	flag.Parse()
 	switch *dnsFlag {
 	case dnsdial.DNSModeUDP, dnsdial.DNSModeDoH, dnsdial.DNSModeAuto:
@@ -68,6 +69,8 @@ func main() {
 		ManualCaptcha:        *manualCaptchaFlag,
 		AutoCaptchaSliderPOC: !*manualCaptchaFlag,
 		DNSMode:              *dnsFlag,
+		UDP:                  *udp,
+		AllocsPerStream:      *allocsFlag,
 		AppCancel:            cancel,
 	}
 

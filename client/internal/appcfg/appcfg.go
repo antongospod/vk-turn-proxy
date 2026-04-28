@@ -10,5 +10,7 @@ type Config struct {
 	ManualCaptcha        bool
 	AutoCaptchaSliderPOC bool
 	DNSMode              string
+	UDP                  bool
+	AllocsPerStream      int // K extra TURN allocations per stream under shared creds
 	AppCancel            context.CancelFunc
 }

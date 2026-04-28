@@ -3,6 +3,7 @@ package turnconn
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -156,6 +157,110 @@ type Params struct {
 	Cfg      *appcfg.Config
 }
 
+// turnAllocation bundles a single TURN session: the dial socket, the TURN client,
+// and the relayed PacketConn returned by Allocate.
+type turnAllocation struct {
+	dialConn io.Closer
+	client   *turn.Client
+	relay    net.PacketConn
+}
+
+func (a *turnAllocation) close() {
+	if a.relay != nil {
+		_ = a.relay.Close()
+	}
+	if a.client != nil {
+		a.client.Close()
+	}
+	if a.dialConn != nil {
+		_ = a.dialConn.Close()
+	}
+}
+
+// dialTurn opens a fresh TURN session under the given (user, pass). Each call
+// produces an independent 5-tuple (own source UDP/TCP port) and an independent
+// TURN allocation. VK may or may not allow multiple allocations under the same
+// credentials — caller is expected to tolerate failures on additional sessions.
+func dialTurn(ctx context.Context, params *Params, turnServerAddr string, turnServerUDPAddr *net.UDPAddr, addrFamily turn.RequestedAddressFamily, user, pass string) (*turnAllocation, error) {
+	var dialCloser io.Closer
+	var turnConn net.PacketConn
+	if params.UDP {
+		conn, err := net.DialUDP("udp", nil, turnServerUDPAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to TURN server: %w", err)
+		}
+		dialCloser = conn
+		turnConn = &netadapt.ConnectedUDPConn{UDPConn: conn}
+	} else {
+		ctx1, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		var d net.Dialer
+		conn, err := d.DialContext(ctx1, "tcp", turnServerAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to TURN server: %w", err)
+		}
+		dialCloser = conn
+		turnConn = turn.NewSTUNConn(&netadapt.CountingConn{Conn: conn})
+	}
+
+	cfg := &turn.ClientConfig{
+		STUNServerAddr:         turnServerAddr,
+		TURNServerAddr:         turnServerAddr,
+		Conn:                   turnConn,
+		Net:                    netadapt.NewDirectNet(),
+		Username:               user,
+		Password:               pass,
+		RequestedAddressFamily: addrFamily,
+		LoggerFactory:          logging.NewDefaultLoggerFactory(),
+	}
+
+	client, err := turn.NewClient(cfg)
+	if err != nil {
+		_ = dialCloser.Close()
+		return nil, fmt.Errorf("failed to create TURN client: %w", err)
+	}
+
+	if err := client.Listen(); err != nil {
+		client.Close()
+		_ = dialCloser.Close()
+		return nil, fmt.Errorf("failed to listen: %w", err)
+	}
+
+	relay, err := client.Allocate()
+	if err != nil {
+		client.Close()
+		_ = dialCloser.Close()
+		return nil, fmt.Errorf("failed to allocate: %w", err)
+	}
+
+	return &turnAllocation{dialConn: dialCloser, client: client, relay: relay}, nil
+}
+
+// relayPool is a concurrent ring of live relay PacketConns. Reads (pick) are
+// non-blocking and lock-free on the hot path; mutation (add/remove) is rare.
+type relayPool struct {
+	mu      sync.RWMutex
+	relays  []net.PacketConn
+	counter atomic.Uint64
+}
+
+func (p *relayPool) add(r net.PacketConn) {
+	p.mu.Lock()
+	p.relays = append(p.relays, r)
+	p.mu.Unlock()
+}
+
+func (p *relayPool) pick() net.PacketConn {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	n := len(p.relays)
+	if n == 0 {
+		return nil
+	}
+	idx := int(p.counter.Add(1)-1) % n
+	return p.relays[idx]
+}
+
 func oneTurnConnection(ctx context.Context, params *Params, peer *net.UDPAddr, conn2 net.PacketConn, streamID int, c chan<- error) {
 	time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
 	var err error
@@ -176,8 +281,7 @@ func oneTurnConnection(ctx context.Context, params *Params, peer *net.UDPAddr, c
 	if params.Port != "" {
 		urlport = params.Port
 	}
-	var turnServerAddr string
-	turnServerAddr = net.JoinHostPort(urlhost, urlport)
+	turnServerAddr := net.JoinHostPort(urlhost, urlport)
 	log.Printf("[STREAM %d] [TURN] dialing %s (udp=%v)", streamID, turnServerAddr, params.UDP)
 	turnServerUDPAddr, err1 := net.ResolveUDPAddr("udp", turnServerAddr)
 	if err1 != nil {
@@ -185,47 +289,6 @@ func oneTurnConnection(ctx context.Context, params *Params, peer *net.UDPAddr, c
 		return
 	}
 	turnServerAddr = turnServerUDPAddr.String()
-	var cfg *turn.ClientConfig
-	var turnConn net.PacketConn
-	var d net.Dialer
-	ctx1, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if params.UDP {
-		conn, err2 := net.DialUDP("udp", nil, turnServerUDPAddr) // nolint: noctx
-		if err2 != nil {
-			err = fmt.Errorf("failed to connect to TURN server: %s", err2)
-			return
-		}
-		defer func() {
-			if err1 = conn.Close(); err1 != nil && err == nil {
-				err = fmt.Errorf("failed to close TURN server connection: %s", err1)
-			}
-		}()
-		turnConn = &netadapt.ConnectedUDPConn{UDPConn: conn}
-	} else {
-		conn, err2 := d.DialContext(ctx1, "tcp", turnServerAddr)
-		if err2 != nil {
-			log.Printf("[STREAM %d] [TURN] tcp dial %s failed: class=%s err=%v",
-				streamID, turnServerAddr, netadapt.ClassifyNetErr(err2), err2)
-			err = fmt.Errorf("failed to connect to TURN server: %s", err2)
-			return
-		}
-		if params.Cfg.Debug {
-			log.Printf("[STREAM %d] [TURN] tcp established %s -> %s",
-				streamID, conn.LocalAddr(), conn.RemoteAddr())
-		}
-		cc := &netadapt.CountingConn{Conn: conn}
-		defer func() {
-			if err != nil && params.Cfg.Debug {
-				log.Printf("[STREAM %d] [TURN] tcp closing after fail: written=%d read=%d",
-					streamID, cc.BytesWritten.Load(), cc.BytesRead.Load())
-			}
-			if err1 = conn.Close(); err1 != nil && err == nil {
-				err = fmt.Errorf("failed to close TURN server connection: %s", err1)
-			}
-		}()
-		turnConn = turn.NewSTUNConn(cc)
-	}
 	var addrFamily turn.RequestedAddressFamily
 	if peer.IP.To4() != nil {
 		addrFamily = turn.RequestedAddressFamilyIPv4
@@ -233,66 +296,88 @@ func oneTurnConnection(ctx context.Context, params *Params, peer *net.UDPAddr, c
 		addrFamily = turn.RequestedAddressFamilyIPv6
 	}
 
-	cfg = &turn.ClientConfig{
-		STUNServerAddr:         turnServerAddr,
-		TURNServerAddr:         turnServerAddr,
-		Conn:                   turnConn,
-		Net:                    netadapt.NewDirectNet(),
-		Username:               user,
-		Password:               pass,
-		RequestedAddressFamily: addrFamily,
-		LoggerFactory:          logging.NewDefaultLoggerFactory(),
-	}
-
-	client, err1 := turn.NewClient(cfg)
-	if err1 != nil {
-		err = fmt.Errorf("failed to create TURN client: %s", err1)
-		return
-	}
-	defer client.Close()
-
-	err1 = client.Listen()
-	if err1 != nil {
-		err = fmt.Errorf("failed to listen: %s", err1)
-		return
-	}
-
-	relayConn, err1 := client.Allocate()
+	primary, err1 := dialTurn(ctx, params, turnServerAddr, turnServerUDPAddr, addrFamily, user, pass)
 	if err1 != nil {
 		if vkauth.IsAuthError(err1) {
 			vkauth.HandleAuthError(streamID)
 		}
-		err = fmt.Errorf("failed to allocate: %s", err1)
+		err = err1
 		return
 	}
 
-	// Reset error count on successful allocation
 	vkauth.ResetErrorCount(streamID)
 
-	// Safely track active streams globally
 	appstate.ConnectedStreams.Add(1)
+	defer appstate.ConnectedStreams.Add(-1)
+
+	if params.Cfg.Debug {
+		log.Printf("[STREAM %d] relayed-address=%s", streamID, primary.relay.LocalAddr().String())
+	}
+
+	pool := &relayPool{}
+	pool.add(primary.relay)
+
+	turnctx, turncancel := context.WithCancel(ctx)
+	defer turncancel()
+
+	// Track all allocations for clean shutdown.
+	allocs := []*turnAllocation{primary}
+	var allocsMu sync.Mutex
 	defer func() {
-		appstate.ConnectedStreams.Add(-1)
-		if err1 := relayConn.Close(); err1 != nil {
-			err = fmt.Errorf("failed to close TURN allocated connection: %s", err1)
+		allocsMu.Lock()
+		for _, a := range allocs {
+			if a.relay != nil {
+				_ = a.relay.SetDeadline(time.Now())
+			}
+		}
+		toClose := allocs
+		allocs = nil
+		allocsMu.Unlock()
+		for _, a := range toClose {
+			a.close()
 		}
 	}()
 
-	if params.Cfg.Debug {
-		log.Printf("[STREAM %d] relayed-address=%s", streamID, relayConn.LocalAddr().String())
-	}
-
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	turnctx, turncancel := context.WithCancel(ctx)
 	context.AfterFunc(turnctx, func() {
-		if err := relayConn.SetDeadline(time.Now()); err != nil {
-			log.Printf("Failed to set relay deadline: %s", err)
+		allocsMu.Lock()
+		defer allocsMu.Unlock()
+		for _, a := range allocs {
+			if a.relay != nil {
+				_ = a.relay.SetDeadline(time.Now())
+			}
 		}
-		// Do not set conn2 deadline (conn2 can sometimes be listenConn if direct mode is used)
 	})
+
 	var internalPipeAddr atomic.Value
 
+	// Inbound goroutine factory: per-relay reader feeding decrypted-side conn2.
+	var inboundWg sync.WaitGroup
+	spawnInbound := func(relay net.PacketConn) {
+		inboundWg.Add(1)
+		go func() {
+			defer inboundWg.Done()
+			defer turncancel()
+			buf := make([]byte, 1600)
+			for {
+				n, _, err1 := relay.ReadFrom(buf)
+				if err1 != nil {
+					return
+				}
+				addr1 := internalPipeAddr.Load()
+				if addr1 == nil {
+					continue
+				}
+				if addr, ok := addr1.(net.Addr); ok {
+					if _, err := conn2.WriteTo(buf[:n], addr); err != nil {
+						return
+					}
+				}
+			}
+		}()
+	}
+	spawnInbound(primary.relay)
+
+	// Outbound: read from conn2, send via round-robin across the relay pool.
 	go func() {
 		defer turncancel()
 		buf := make([]byte, 1600)
@@ -307,42 +392,51 @@ func oneTurnConnection(ctx context.Context, params *Params, peer *net.UDPAddr, c
 			if turnctx.Err() != nil {
 				return
 			}
-
 			internalPipeAddr.Store(addr1)
 
-			_, err1 = relayConn.WriteTo(buf[:n], peer)
-			if err1 != nil {
+			r := pool.pick()
+			if r == nil {
+				return
+			}
+			if _, err1 = r.WriteTo(buf[:n], peer); err1 != nil {
 				return
 			}
 		}
 	}()
 
-	go func() {
-		defer wg.Done()
-		defer turncancel()
-		buf := make([]byte, 1600)
-		for {
-			n, _, err1 := relayConn.ReadFrom(buf)
-			if err1 != nil {
+	// Open extra allocations under the same creds. DTLS handshake completes
+	// over the primary first; deferring extras lets the server install the
+	// Connection ID so subsequent multi-path packets are matched to the
+	// existing session via CID rather than 5-tuple.
+	extras := params.Cfg.AllocsPerStream - 1
+	if extras > 0 {
+		go func() {
+			select {
+			case <-turnctx.Done():
 				return
+			case <-time.After(3 * time.Second):
 			}
-			addr1 := internalPipeAddr.Load()
-			if addr1 == nil {
-				continue
-			}
-
-			if addr, ok := addr1.(net.Addr); ok {
-				if _, err := conn2.WriteTo(buf[:n], addr); err != nil {
+			for i := 0; i < extras; i++ {
+				if turnctx.Err() != nil {
 					return
 				}
+				extra, err := dialTurn(ctx, params, turnServerAddr, turnServerUDPAddr, addrFamily, user, pass)
+				if err != nil {
+					log.Printf("[STREAM %d] [TURN] extra alloc %d/%d failed: %v", streamID, i+1, extras, err)
+					continue
+				}
+				log.Printf("[STREAM %d] [TURN] extra alloc %d/%d OK relay=%s", streamID, i+1, extras, extra.relay.LocalAddr())
+				allocsMu.Lock()
+				allocs = append(allocs, extra)
+				allocsMu.Unlock()
+				pool.add(extra.relay)
+				spawnInbound(extra.relay)
+				time.Sleep(200 * time.Millisecond) // jitter the bring-up
 			}
-		}
-	}()
-
-	wg.Wait()
-	if err := relayConn.SetDeadline(time.Time{}); err != nil {
-		log.Printf("Failed to clear relay deadline: %s", err)
+		}()
 	}
+
+	inboundWg.Wait()
 }
 
 func DtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, inboundChan <-chan *dispatcher.UDPPacket, connchan chan<- net.PacketConn, okchan chan<- struct{}, streamID int) {
