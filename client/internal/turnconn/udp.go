@@ -96,7 +96,7 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	}
 
 	wg := sync.WaitGroup{}
-	wg.Add(1)
+	wg.Add(2)
 	context.AfterFunc(dtlsctx, func() {
 		if err := dtlsConn.SetDeadline(time.Now()); err != nil {
 			log.Printf("[STREAM %d] Warning: SetDeadline failed: %v", streamID, err)
@@ -104,6 +104,7 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	})
 
 	go func() {
+		defer wg.Done()
 		defer dtlscancel()
 		for {
 			select {
@@ -138,9 +139,6 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	}()
 
 	wg.Wait()
-	if err := dtlsConn.SetDeadline(time.Time{}); err != nil {
-		log.Printf("[STREAM %d] Failed to clear DTLS deadline: %s", streamID, err)
-	}
 	return nil
 }
 

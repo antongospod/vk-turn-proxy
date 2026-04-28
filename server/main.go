@@ -244,7 +244,9 @@ func (p *dtlsPool) handleConn(ctx context.Context, conn net.Conn) {
 		_ = conn.SetDeadline(time.Now()) //nolint:errcheck
 	})
 
-	// Writer goroutine (sends inbound WG packets back through DTLS)
+	// Writer goroutine (sends inbound WG packets back through DTLS).
+	// Deadline is governed by ctx2 (see context.AfterFunc above) — no per-packet
+	// SetWriteDeadline syscall is needed on the hot path.
 	go func() {
 		defer cancel2()
 		for {
@@ -252,11 +254,10 @@ func (p *dtlsPool) handleConn(ctx context.Context, conn net.Conn) {
 			case <-ctx2.Done():
 				return
 			case pkt := <-w.tx:
-				if err := conn.SetWriteDeadline(time.Now().Add(time.Second * 5)); err == nil {
-					if _, err := conn.Write(pkt); err != nil {
-						return // Stop on write error
-					}
+				if _, err := conn.Write(pkt); err != nil {
+					return
 				}
+				w.lastActive.Store(time.Now().Unix())
 			}
 		}
 	}()
