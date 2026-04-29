@@ -64,7 +64,7 @@ var (
 	globalCaptchaLockout atomic.Int64
 	connectedStreams     atomic.Int32
 	globalAppCancel      context.CancelFunc
-	handshakeSem         = make(chan struct{}, 3)
+	handshakeSem         chan struct{}
 	isDebug              bool
 	manualCaptcha        bool
 	autoCaptchaSliderPOC bool
@@ -1648,7 +1648,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 }
 
 func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, inboundChan <-chan *UDPPacket, connchan chan<- net.PacketConn, okchan chan<- struct{}, streamID int) error {
-	time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
+	time.Sleep(time.Duration(rand.Intn(100)+30) * time.Millisecond)
 
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
 	defer dtlscancel()
@@ -1934,7 +1934,7 @@ func (p *relayPool) pick() net.PacketConn {
 }
 
 func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UDPAddr, conn2 net.PacketConn, streamID int, c chan<- error) {
-	time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
+	time.Sleep(time.Duration(rand.Intn(100)+30) * time.Millisecond)
 	var err error
 	defer func() { c <- err }()
 	user, pass, urlTarget, err1 := turnParams.getCreds(ctx, turnParams.link, streamID)
@@ -2083,7 +2083,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 			select {
 			case <-turnctx.Done():
 				return
-			case <-time.After(3 * time.Second):
+			case <-time.After(1 * time.Second):
 			}
 			for i := 0; i < extras; i++ {
 				if turnctx.Err() != nil {
@@ -2211,7 +2211,12 @@ func main() {
 	manualCaptchaFlag := flag.Bool("manual-captcha", false, "skip auto captcha solving, use manual mode immediately")
 	dnsFlag := flag.String("dns", DNSModeAuto, "DNS resolution mode: udp | doh | auto (auto tries UDP/53 first, sticky-fallback to DoH on total failure)")
 	allocsFlag := flag.Int("allocs-per-stream", 1, "open this many TURN allocations per stream under shared creds (only useful if VK throttles per-allocation)")
+	handshakeConc := flag.Int("handshake-concurrency", 8, "max concurrent DTLS handshakes")
 	flag.Parse()
+	if *handshakeConc < 1 {
+		*handshakeConc = 1
+	}
+	handshakeSem = make(chan struct{}, *handshakeConc)
 	switch *dnsFlag {
 	case DNSModeUDP, DNSModeDoH, DNSModeAuto:
 		dnsMode = *dnsFlag
@@ -2344,7 +2349,7 @@ func main() {
 	}()
 
 	wg1 := sync.WaitGroup{}
-	t := time.Tick(200 * time.Millisecond)
+	t := time.Tick(100 * time.Millisecond)
 
 	if *direct {
 		log.Panicf("Direct mode not supported with dispatcher")
@@ -2451,7 +2456,7 @@ func runVLESSMode(ctx context.Context, tp *turnParams, peer *net.UDPAddr, listen
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Duration(id) * 300 * time.Millisecond):
+			case <-time.After(time.Duration(id) * 100 * time.Millisecond):
 			}
 			maintainVLESSSession(ctx, tp, peer, id, pool)
 		}(i)
