@@ -65,35 +65,12 @@ func (p *sessionPool) count() int {
 func RunVLESSMode(ctx context.Context, tp *Params, peer *net.UDPAddr, listenAddr string, numSessions int) {
 	pool := &sessionPool{}
 
-	// Start N session maintainers with staggered startup
-	var wgMaint sync.WaitGroup
-	for i := 0; i < numSessions; i++ {
-		wgMaint.Add(1)
-		go func(id int) {
-			defer wgMaint.Done()
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Duration(id) * 300 * time.Millisecond):
-			}
-			maintainVLESSSession(ctx, tp, peer, id, pool)
-		}(i)
-	}
-
-	// Wait for at least one session
-	log.Printf("VLESS mode: waiting for sessions to connect (total: %d)...", numSessions)
-	for {
-		select {
-		case <-ctx.Done():
-			wgMaint.Wait()
-			return
-		case <-time.After(100 * time.Millisecond):
-		}
-		if pool.count() > 0 {
-			break
-		}
-	}
-
+	// Bind the TCP listener up-front so the host UI sees the port bound
+	// immediately. Sessions can take many seconds to establish (captcha +
+	// throttled identity acquisition); deferring the bind until the first
+	// session is up causes UIs that watch for the socket to time out and
+	// kill the process. Connections that arrive before any session is
+	// active are rejected by the pool.pick() == nil branch below.
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		log.Panicf("TCP listen: %s", err)
@@ -106,7 +83,52 @@ func RunVLESSMode(ctx context.Context, tp *Params, peer *net.UDPAddr, listenAddr
 	}
 
 	context.AfterFunc(ctx, func() { _ = wrappedListener.Close() })
-	log.Printf("VLESS mode: listening on %s (round-robin across %d sessions)", listenAddr, numSessions)
+	log.Printf("VLESS mode: listening on %s (round-robin across %d sessions, sessions connecting...)", listenAddr, numSessions)
+	// Legacy line preserved verbatim — the Android host parses it via
+	// VLESS_TOTAL_REGEX to populate the connection-stats target.
+	log.Printf("VLESS mode: waiting for sessions to connect (total: %d)...", numSessions)
+
+	// Coordinated cold start: maintainer 0 runs immediately so the first
+	// VK identity (and its captcha) is acquired exactly once. Maintainers
+	// 1..N-1 wait until pool has at least one active session, then stagger
+	// 200ms apart. By then identity caches are warm, so they only execute
+	// the lightweight slot-acquisition path (gated by per-identity slotMu).
+	// This preserves the original streamID%n credential sharding without
+	// forcing N captchas serialised under vkRequestMu on cold start.
+	var wgMaint sync.WaitGroup
+	wgMaint.Add(1)
+	go func() {
+		defer wgMaint.Done()
+		maintainVLESSSession(ctx, tp, peer, 0, pool)
+	}()
+
+	for i := 1; i < numSessions; i++ {
+		wgMaint.Add(1)
+		go func(id int) {
+			defer wgMaint.Done()
+			// Wait for pool to have an active session before joining,
+			// so identity caches are warm and we don't pile up under
+			// vkRequestMu.
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(150 * time.Millisecond):
+				}
+				if pool.count() > 0 {
+					break
+				}
+			}
+			// Light stagger so 11 maintainers don't fire slot acquires
+			// in the same instant.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(id-1) * 200 * time.Millisecond):
+			}
+			maintainVLESSSession(ctx, tp, peer, id, pool)
+		}(i)
+	}
 
 	var wgConn sync.WaitGroup
 	for {

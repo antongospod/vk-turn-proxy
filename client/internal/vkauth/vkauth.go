@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -205,7 +206,15 @@ type vkIdentity struct {
 	client     tlsclient.HttpClient
 	expiresAt  time.Time
 	urlCounter atomic.Uint64 // round-robin index across turn_server.urls
+
+	// slotMu serialises acquireVkTurnSlot calls under one identity to avoid
+	// VK error_code:29 (rate limit) when many sessions race for slots in
+	// parallel (e.g. VLESS mode with N>1).
+	slotMu     sync.Mutex
+	lastSlotAt time.Time
 }
+
+const slotMinInterval = 500 * time.Millisecond
 
 type identityCacheKey struct {
 	link     string
@@ -289,6 +298,13 @@ func fetchVkCreds(ctx context.Context, link string, streamID int, cfg *appcfg.Co
 			return user, pass, addr, nil
 		}
 
+		// Context cancellation isn't an identity problem — process is
+		// shutting down. Don't drop the cached identity (would force a
+		// fresh captcha on next launch).
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", "", "", err
+		}
+
 		lastErr = err
 		log.Printf("[STREAM %d] [VK Auth] slot acquire failed (client_id=%s): %v", streamID, creds.ClientID, err)
 		invalidateIdentity(link, creds.ClientID)
@@ -297,7 +313,7 @@ func fetchVkCreds(ctx context.Context, link string, streamID int, cfg *appcfg.Co
 			return "", "", "", err
 		}
 		if strings.Contains(err.Error(), "error_code:29") || strings.Contains(err.Error(), "error_code: 29") || strings.Contains(err.Error(), "Rate limit") {
-			log.Printf("[STREAM %d] [VK Auth] Rate limit detected, trying next credentials...", streamID)
+			log.Printf("[STREAM %d] [VK Auth] VK throttle on credentials, trying next...", streamID)
 		}
 	}
 
@@ -362,7 +378,7 @@ func acquireVkIdentity(ctx context.Context, link string, streamID int, creds VKC
 	elapsed := time.Since(globalLastVkFetchTime)
 	if !globalLastVkFetchTime.IsZero() && elapsed < minInterval {
 		wait := minInterval - elapsed
-		log.Printf("[STREAM %d] [VK Auth] Throttling: waiting %v to prevent rate limit...", streamID, wait.Truncate(time.Millisecond))
+		log.Printf("[STREAM %d] [VK Auth] identity cooldown: waiting %v before next VK request...", streamID, wait.Truncate(time.Millisecond))
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -512,6 +528,25 @@ func acquireVkIdentity(ctx context.Context, link string, streamID int, creds VKC
 // run multiple parallel TURN allocations under the same identity — bypassing
 // per-username throttling without re-solving captcha.
 func acquireVkTurnSlot(ctx context.Context, link string, streamID int, ident *vkIdentity, cfg *appcfg.Config) (string, string, string, error) {
+	ident.slotMu.Lock()
+	defer ident.slotMu.Unlock()
+
+	if !ident.lastSlotAt.IsZero() {
+		elapsed := time.Since(ident.lastSlotAt)
+		if elapsed < slotMinInterval {
+			wait := slotMinInterval - elapsed
+			if cfg.Debug {
+				log.Printf("[STREAM %d] [VK Auth] slot throttle: waiting %v", streamID, wait.Truncate(time.Millisecond))
+			}
+			select {
+			case <-ctx.Done():
+				return "", "", "", ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+	}
+	defer func() { ident.lastSlotAt = time.Now() }()
+
 	// Step 4: auth.anonymLogin with fresh device_id → fresh session_key
 	sessionData := fmt.Sprintf(`{"version":2,"device_id":"%s","client_version":1.1,"client_type":"SDK_JS"}`, uuid.New())
 	data := fmt.Sprintf("session_data=%s&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA", neturl.QueryEscape(sessionData))
